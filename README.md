@@ -113,12 +113,108 @@ make CROSS_COMPILE=aarch64-linux-gnu- \
      install
 ```
 
+
 ### 交叉编译环境准备
 
-使用 [crosstool-NG](https://crosstool-ng.github.io/) 或发行版自带的交叉编译器。例如 Ubuntu 安装 ARM 交叉编译器：
+#### Debian / Ubuntu
+
+Debian 和 Ubuntu 的交叉编译工具链及 sysroot 位于官方仓库，无需额外启用第三方源。
+
+**安装 ARM64 (aarch64) 交叉编译器：**
 
 ```bash
-sudo apt-get install gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu
+sudo apt-get update
+sudo apt-get install gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+```
+
+> **说明**：`gcc-aarch64-linux-gnu` 提供交叉编译器，`libc6-dev-arm64-cross` 提供目标架构的 glibc 头文件和静态库（含 `time.h` 等）。若缺少后者，编译时会报错 `time.h: No such file or directory`。
+
+如果需要同时安装 C++ 编译器及完整交叉编译构建环境，可安装：
+
+```bash
+sudo apt-get install crossbuild-essential-arm64
+```
+
+（该元包会自动引入 `gcc-aarch64-linux-gnu`、`g++-aarch64-linux-gnu` 及对应的 libc 开发包。）
+
+---
+
+#### RHEL 10 / CentOS Stream 10 / AlmaLinux 10 / Rocky Linux 10
+
+RHEL 系列发行版中，aarch64 交叉编译器位于 **EPEL** 仓库，但 EPEL 提供的 `gcc-aarch64-linux-gnu` **默认不包含完整的 glibc sysroot 头文件**。因此需要额外启用 **CentOS Stream 的交叉编译仓库** 或使用 QEMU 用户态 + `systemd-nspawn`/`chroot` 构建根文件系统。
+
+**方案一：使用 CentOS Stream 交叉编译仓库（推荐）**
+
+1. **启用 EPEL 和 CodeReady Builder 仓库：**
+
+```bash
+# 安装 EPEL
+sudo dnf install epel-release
+
+# 启用 CodeReady Builder (CRB) 仓库，交叉编译相关包依赖此源
+sudo subscription-manager repos --enable codeready-builder-for-rhel-10-$(uname -m)-rpms
+# 或使用 dnf config-manager（CentOS Stream / AlmaLinux / Rocky）：
+# sudo dnf config-manager --set-enabled crb
+```
+
+2. **安装 aarch64 交叉编译器：**
+
+```bash
+sudo dnf install gcc-aarch64-linux-gnu
+```
+
+3. **解决缺失的 sysroot 头文件**
+
+默认安装的交叉编译器 sysroot 路径为 `/usr/aarch64-linux-gnu/sys-root`，但该目录为空，缺少 `time.h` 等 C 标准库头文件。目前 RHEL 10 EPEL 尚未提供完整的 `aarch64-linux-gnu-glibc` 或 `sysroot` 包，因此需要手动准备：
+
+- **方法 A：从 CentOS Stream / Fedora 提取根文件系统**
+
+```bash
+# 下载 CentOS Stream 10 aarch64 根文件系统
+sudo mkdir -p /usr/aarch64-linux-gnu/sys-root
+sudo dnf --installroot=/usr/aarch64-linux-gnu/sys-root \
+     --forcearch=aarch64 \
+     --releasever=10 \
+     install gcc glibc-devel kernel-headers
+```
+
+- **方法 B：使用已有的 aarch64 rootfs**
+
+如果你已有目标设备的根文件系统（例如通过 `debootstrap` 或导出容器镜像），可直接指定：
+
+```bash
+make CROSS_COMPILE=aarch64-linux-gnu- \
+     SYSROOT=/path/to/aarch64-rootfs
+```
+
+> **注意**：RHEL 10 当前仓库中缺少 `aarch64-linux-gnu-glibc` / `aarch64-linux-gnu-sysroot` 包，因此无法仅通过 `dnf install` 完成完整交叉编译环境配置，必须手动提供 sysroot。
+
+---
+
+#### 通用：使用 crosstool-NG 自定义工具链
+
+如果发行版提供的交叉编译器不完整，可使用 [crosstool-NG](https://crosstool-ng.github.io/) 自行构建包含完整 glibc 的工具链：
+
+```bash
+git clone https://github.com/crosstool-ng/crosstool-ng.git
+cd crosstool-ng
+./bootstrap
+./configure --prefix=/opt/crosstool-ng
+make
+sudo make install
+export PATH=/opt/crosstool-ng/bin:$PATH
+
+# 创建 aarch64 工具链配置
+mkdir ~/ctng-build && cd ~/ctng-build
+ct-ng aarch64-unknown-linux-gnu
+ct-ng build
+```
+
+构建完成后，工具链位于 `~/x-tools/aarch64-unknown-linux-gnu/bin/`，编译时指定：
+
+```bash
+export PATH=$HOME/x-tools/aarch64-unknown-linux-gnu/bin:$PATH
+make CROSS_COMPILE=aarch64-unknown-linux-gnu-
 ```
 
 ## 使用
