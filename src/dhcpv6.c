@@ -285,23 +285,23 @@ static void relay_client_request(struct sockaddr_in6 *source,
 	else
 		inet_pton(AF_INET6, ALL_DHCPV6_SERVERS, &s.sin6_addr);
 
+	/*
+	 * RFC 8415 §18.2.1: the link-address field identifies the link the
+	 * client is on so the server can select an address/prefix that is
+	 * actually usable there. If the slave (downstream, client-facing)
+	 * interface has no address of its own yet - e.g. it is itself
+	 * waiting on this very relayed exchange to obtain one - the field
+	 * MUST NOT be filled in with an address from a different link (that
+	 * would make the server hand out a WAN-scoped prefix instead of one
+	 * for the client's actual link). The RFC-compliant fallback for
+	 * "no usable address known" is the unspecified address, which is
+	 * exactly what hdr.link_address already defaults to (zero-init
+	 * above), so we simply leave it untouched instead of borrowing the
+	 * master/WAN interface's address as this code used to do.
+	 */
 	avl_for_each_element(&interfaces, c, avl) {
 		if (!c->master || c->dhcpv6 != MODE_RELAY)
 			continue;
-
-		if (!ip) {
-			/* No suitable address! Is the slave not configured yet?
-			 * Detect public IP of master interface and use it instead
-			 * This is WRONG and probably violates the RFC. However
-			 * otherwise we have a hen and egg problem because the
-			 * slave-interface cannot be auto-configured. */
-			ip = relay_link_address(c);
-			if (!ip)
-				continue; /* Could not obtain a suitable address */
-
-			memcpy(&hdr.link_address, &ip->addr.in6, sizeof(hdr.link_address));
-			ip = NULL;
-		}
 
 		debug("Sending a DHCPv6-relay-forward on %s", c->name);
 

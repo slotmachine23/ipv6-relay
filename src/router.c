@@ -215,6 +215,27 @@ static void send_router_solicitation(const struct interface *iface)
 		.nd_rs_cksum = 0,
 		.nd_rs_reserved = 0,
 	};
+	/*
+	 * RFC 4861 §4.1: a Router Solicitation SHOULD include a Source
+	 * Link-Layer Address option whenever it is sent with a specified
+	 * (non-unspecified) source address, which is always the case here.
+	 * Without it, the upstream router has to perform its own Neighbor
+	 * Solicitation to learn our MAC before it can unicast back the
+	 * solicited Router Advertisement, adding avoidable latency (and, on
+	 * some implementations, an extra chance for the reply to be lost)
+	 * to every reactive RA fetch this daemon performs.
+	 */
+	struct {
+		struct nd_opt_hdr hdr;
+		uint8_t mac[6];
+	} _o_packed slla_opt = {
+		.hdr = { .nd_opt_type = ND_OPT_SOURCE_LINKADDR, .nd_opt_len = 1 },
+	};
+	struct iovec iov[2] = {
+		{ &rs, sizeof(rs) },
+		{ &slla_opt, 0 },
+	};
+	size_t iov_len = 1;
 
 	if (iface->router_event.uloop.fd < 0)
 		return;
@@ -224,8 +245,12 @@ static void send_router_solicitation(const struct interface *iface)
 	all_routers.sin6_port = htons(IPPROTO_ICMPV6);
 	inet_pton(AF_INET6, ALL_IPV6_ROUTERS, &all_routers.sin6_addr);
 
-	odhcpd_send(iface->router_event.uloop.fd, &all_routers,
-			&(struct iovec){&rs, sizeof(rs)}, 1, iface);
+	if (odhcpd_get_mac(iface, slla_opt.mac) == 0) {
+		iov[1].iov_len = sizeof(slla_opt);
+		iov_len = 2;
+	}
+
+	odhcpd_send(iface->router_event.uloop.fd, &all_routers, iov, iov_len, iface);
 }
 
 /*
@@ -263,11 +288,60 @@ static void forward_router_solicitation(const struct interface *iface)
 	}
 }
 
+/*
+ * Rewrite the Source Link-Layer Address option (RFC 4861 §4.6.1) of a
+ * Router Advertisement in place so it carries the MAC address of the
+ * interface the packet is about to be re-sent on, instead of the
+ * upstream router's MAC copied verbatim from the original packet.
+ *
+ * The RA's IPv6 source address is rewritten by the kernel to one of our
+ * own addresses on the outgoing (downstream) interface - odhcpd_send()
+ * leaves ipi6_addr unspecified, so the kernel picks our link-local
+ * address there - but without this fix the packet still *claims*, via
+ * the SLLA option, that the sender's link-layer address is the
+ * upstream/WAN router's MAC. Per RFC 4861 §6.3.4, a receiving host uses
+ * that option to create/update its Neighbor Cache entry for the sender
+ * (i.e. for what is now our own downstream address) without doing a
+ * Neighbor Solicitation first. Hosts therefore learn a bogus link-layer
+ * address for their default router: unicast traffic sent using that
+ * cached (wrong, foreign-link) MAC is silently dropped until Neighbor
+ * Unreachability Detection eventually times it out and re-resolves via
+ * multicast NS - observed as periodic multi-second IPv6 stalls
+ * ("intermittent" connectivity) recurring roughly every REACHABLE_TIME.
+ */
+static void fix_source_linkaddr_option(uint8_t *data, size_t len, const uint8_t mac[6])
+{
+	uint8_t *opt, *end;
+
+	if (len < sizeof(struct nd_router_advert))
+		return;
+
+	opt = data + sizeof(struct nd_router_advert);
+	end = data + len;
+
+	while (opt + sizeof(struct nd_opt_hdr) <= end) {
+		struct nd_opt_hdr *oh = (struct nd_opt_hdr *)opt;
+		size_t optlen = (size_t)oh->nd_opt_len * 8;
+		size_t addrlen;
+
+		if (optlen == 0 || opt + optlen > end)
+			break; /* Malformed/truncated option, stop parsing */
+
+		if (oh->nd_opt_type == ND_OPT_SOURCE_LINKADDR) {
+			addrlen = optlen - sizeof(struct nd_opt_hdr);
+			memcpy(opt + sizeof(struct nd_opt_hdr), mac, min(addrlen, (size_t)6));
+		}
+
+		opt += optlen;
+	}
+}
+
 /* Forward router advertisement */
 static void forward_router_advertisement(const struct interface *iface, uint8_t *data, size_t len)
 {
 	struct interface *c;
 	struct sockaddr_in6 all_nodes;
+	uint8_t buf[1500];
 
 	memset(&all_nodes, 0, sizeof(all_nodes));
 	all_nodes.sin6_family = AF_INET6;
@@ -275,13 +349,25 @@ static void forward_router_advertisement(const struct interface *iface, uint8_t 
 	inet_pton(AF_INET6, ALL_IPV6_NODES, &all_nodes.sin6_addr);
 
 	avl_for_each_element(&interfaces, c, avl) {
+		uint8_t *out = data;
+		uint8_t mac[6];
+
 		if (c->ifindex == iface->ifindex || c->master || c->ra != MODE_RELAY)
 			continue;
+
+		/* Each downstream interface needs the SLLA option patched to
+		 * its own MAC, so operate on a private copy - the original
+		 * "data" buffer is shared across all downstream interfaces. */
+		if (len <= sizeof(buf) && odhcpd_get_mac(c, mac) == 0) {
+			memcpy(buf, data, len);
+			fix_source_linkaddr_option(buf, len, mac);
+			out = buf;
+		}
 
 		/* Must send on the destination interface's own socket, since
 		 * each socket is bound (SO_BINDTODEVICE) to its own iface. */
 		odhcpd_send(c->router_event.uloop.fd, &all_nodes,
-				&(struct iovec){data, len}, 1, c);
+				&(struct iovec){out, len}, 1, c);
 	}
 }
 
@@ -301,6 +387,16 @@ static void handle_icmpv6(void *addr, void *data, size_t len,
 
 	/* Ignore if too short to contain an ICMPv6 header */
 	if (len < sizeof(*hdr))
+		return;
+
+	/*
+	 * RFC 4861 §6.1.1 (RS) / §6.1.2 (RA): silently discard a message
+	 * whose ICMP Code is non-zero. The Hop Limit == 255 half of the
+	 * same validation (which is what actually prevents off-link
+	 * spoofing) is already enforced by odhcpd_receive_packets() via the
+	 * kernel-reported IPV6_HOPLIMIT ancillary data.
+	 */
+	if (hdr->icmp6_code != 0)
 		return;
 
 	/* For relay mode, just forward RS and RA between interfaces */
