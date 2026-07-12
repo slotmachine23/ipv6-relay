@@ -137,15 +137,10 @@ static void handle_dhcpv6(void *addr, void *data, size_t len,
 	(void)dest_addr;
 
 	if (iface->dhcpv6 == MODE_RELAY) {
-		if (iface->master) {
+		if (iface->master)
 			relay_server_response(data, len);
-		} else if (iface->dhcpv6_relay_server_addrs6_cnt > 0) {
-			for (size_t i = 0; i < iface->dhcpv6_relay_server_addrs6_cnt; i++) {
-				relay_client_request(addr, data, len, iface, &iface->dhcpv6_relay_server_addrs6[i]);
-			}
-		} else {
+		else
 			relay_client_request(addr, data, len, iface, NULL);
-		}
 	}
 }
 

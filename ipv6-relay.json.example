@@ -14,10 +14,7 @@
       "ra": "relay",
       "dhcpv6": "relay",
       "ndp": "relay",
-      "master": true,
-      "dhcpv6_relay_servers": [
-        "2001:db8::1"
-      ]
+      "master": true
     }
   }
 }

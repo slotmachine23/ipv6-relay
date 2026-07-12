@@ -183,9 +183,6 @@ struct interface {
 	int learn_routes;
 	bool have_link_local;
 
-	// DHCPv6 relay
-	struct in6_addr *dhcpv6_relay_server_addrs6;
-	size_t dhcpv6_relay_server_addrs6_cnt;
 	char *upstream;
 	size_t upstream_len;
 };

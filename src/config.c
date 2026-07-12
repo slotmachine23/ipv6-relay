@@ -33,7 +33,6 @@ static void set_interface_defaults(struct interface *iface)
 static void clean_interface(struct interface *iface)
 {
 	free(iface->upstream);
-	free(iface->dhcpv6_relay_server_addrs6);
 	memset(&iface->ra, 0, sizeof(*iface) - offsetof(struct interface, ra));
 	set_interface_defaults(iface);
 }
@@ -177,42 +176,6 @@ int config_parse_interface_json(const char *name, struct json_object *obj)
 
 	if (json_object_object_get_ex(obj, "ndp_from_link_local", &tmp))
 		iface->ndp_from_link_local = json_object_get_boolean(tmp);
-
-	if (json_object_object_get_ex(obj, "dhcpv6_relay_servers", &tmp)) {
-		array_list *servers = json_object_get_array(tmp);
-		if (servers) {
-			for (size_t i = 0; i < array_list_length(servers); i++) {
-				struct json_object *server_obj = array_list_get_idx(servers, i);
-				const char *server_str = json_object_get_string(server_obj);
-				struct in6_addr addr6, *tmp6;
-
-				if (!server_str)
-					continue;
-
-				if (inet_pton(AF_INET6, server_str, &addr6) != 1) {
-					error("Invalid dhcpv6_relay_server '%s' for interface '%s'",
-					      server_str, iface->name);
-					continue;
-				}
-
-				if (IN6_IS_ADDR_UNSPECIFIED(&addr6)) {
-					error("Invalid dhcpv6_relay_server '%s' for interface '%s'",
-					      server_str, iface->name);
-					continue;
-				}
-
-				tmp6 = realloc(iface->dhcpv6_relay_server_addrs6,
-					       (iface->dhcpv6_relay_server_addrs6_cnt + 1) *
-					       sizeof(*iface->dhcpv6_relay_server_addrs6));
-
-				if (!tmp6)
-					goto err;
-
-				iface->dhcpv6_relay_server_addrs6 = tmp6;
-				iface->dhcpv6_relay_server_addrs6[iface->dhcpv6_relay_server_addrs6_cnt++] = addr6;
-			}
-		}
-	}
 
 	return 0;
 
