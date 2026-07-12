@@ -78,7 +78,7 @@ int config_parse_interface_json(const char *name, struct json_object *obj)
 	if (!iface) {
 		char *new_name;
 
-		iface = calloc_a(sizeof(*iface), &new_name, strlen(name) + 1);
+		iface = calloc_a(sizeof(*iface), &new_name, strlen(name) + 1, NULL);
 		if (!iface)
 			return -1;
 
