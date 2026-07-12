@@ -1,5 +1,5 @@
 [Unit]
-Description=IPv6 Relay Daemon for %i
+Description=IPv6 Relay Daemon
 After=network.target
 Wants=network.target
 
@@ -7,7 +7,7 @@ Wants=network.target
 Type=simple
 Restart=on-failure
 RestartSec=5
-ExecStart=/usr/sbin/ipv6-relay -c /etc/ipv6-relay/%i.json
+ExecStart=/usr/sbin/ipv6-relay -c /etc/ipv6-relay/config.json
 ExecReload=/bin/kill -HUP $MAINPID
 
 [Install]

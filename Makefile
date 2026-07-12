@@ -79,9 +79,9 @@ install: $(TARGET)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/
 	install -d $(DESTDIR)$(SYSCONFDIR)/ipv6-relay
-	install -m 644 ipv6-relay.json.example $(DESTDIR)$(SYSCONFDIR)/ipv6-relay/
+	install -m 644 config.json.example $(DESTDIR)$(SYSCONFDIR)/ipv6-relay/
 	install -d $(DESTDIR)$(UNITDIR)
-	install -m 644 ipv6-relay@.service $(DESTDIR)$(UNITDIR)/
+	install -m 644 ipv6-relay.service $(DESTDIR)$(UNITDIR)/
 
 install-deb: install
 	install -d $(DESTDIR)$(SYSCONFDIR)/default
