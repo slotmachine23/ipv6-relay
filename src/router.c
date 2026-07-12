@@ -151,7 +151,9 @@ int router_setup_interface(struct interface *iface, bool enable)
 		mreq.ipv6mr_interface = iface->ifindex;
 
 		if (iface->master) {
-			inet_pton(AF_INET6, ALL_IPV6_ROUTERS, &mreq.ipv6mr_multiaddr);
+			/* Master (upstream) interface receives unsolicited RAs,
+			 * which are sent to the all-nodes multicast address. */
+			inet_pton(AF_INET6, ALL_IPV6_NODES, &mreq.ipv6mr_multiaddr);
 			if (setsockopt(iface->router_event.uloop.fd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
 						&mreq, sizeof(mreq)) < 0) {
 				error("setsockopt(IPV6_ADD_MEMBERSHIP): %m");
@@ -159,7 +161,9 @@ int router_setup_interface(struct interface *iface, bool enable)
 				goto out;
 			}
 		} else {
-			inet_pton(AF_INET6, ALL_IPV6_NODES, &mreq.ipv6mr_multiaddr);
+			/* Slave (downstream) interface receives RSs from hosts,
+			 * which are sent to the all-routers multicast address. */
+			inet_pton(AF_INET6, ALL_IPV6_ROUTERS, &mreq.ipv6mr_multiaddr);
 			if (setsockopt(iface->router_event.uloop.fd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
 						&mreq, sizeof(mreq)) < 0) {
 				error("setsockopt(IPV6_ADD_MEMBERSHIP): %m");
@@ -183,6 +187,12 @@ static void forward_router_solicitation(const struct interface *iface)
 {
 	struct interface *c;
 	struct sockaddr_in6 all_routers;
+	struct nd_router_solicit rs = {
+		.nd_rs_type = ND_ROUTER_SOLICIT,
+		.nd_rs_code = 0,
+		.nd_rs_cksum = 0,
+		.nd_rs_reserved = 0,
+	};
 
 	memset(&all_routers, 0, sizeof(all_routers));
 	all_routers.sin6_family = AF_INET6;
@@ -193,8 +203,10 @@ static void forward_router_solicitation(const struct interface *iface)
 		if (c->ifindex == iface->ifindex || !c->master || c->ra != MODE_RELAY)
 			continue;
 
-		odhcpd_send(iface->router_event.uloop.fd, &all_routers,
-				&(struct iovec){NULL, 0}, 1, c);
+		/* Must send on the destination interface's own socket, since
+		 * each socket is bound (SO_BINDTODEVICE) to its own iface. */
+		odhcpd_send(c->router_event.uloop.fd, &all_routers,
+				&(struct iovec){&rs, sizeof(rs)}, 1, c);
 	}
 }
 
@@ -213,7 +225,9 @@ static void forward_router_advertisement(const struct interface *iface, uint8_t 
 		if (c->ifindex == iface->ifindex || c->master || c->ra != MODE_RELAY)
 			continue;
 
-		odhcpd_send(iface->router_event.uloop.fd, &all_nodes,
+		/* Must send on the destination interface's own socket, since
+		 * each socket is bound (SO_BINDTODEVICE) to its own iface. */
+		odhcpd_send(c->router_event.uloop.fd, &all_nodes,
 				&(struct iovec){data, len}, 1, c);
 	}
 }
@@ -224,14 +238,16 @@ static void handle_icmpv6(void *addr, void *data, size_t len,
 {
 	(void)addr;
 	(void)dest;
-	struct ip6_hdr *ip6 = data;
-	struct icmp6_hdr *hdr = (struct icmp6_hdr *)&ip6[1];
+	/*
+	 * Raw AF_INET6/IPPROTO_ICMPV6 sockets deliver only the ICMPv6
+	 * payload on receive - unlike IPv4 raw sockets, the IPv6 header is
+	 * never prepended (RFC 3542 Section 3). "data" therefore already
+	 * starts at the ICMPv6 header.
+	 */
+	struct icmp6_hdr *hdr = data;
 
-	/* Ignore if not ICMPv6 or wrong length */
-	if (len < sizeof(*ip6) + sizeof(*hdr))
-		return;
-
-	if (ip6->ip6_nxt != IPPROTO_ICMPV6)
+	/* Ignore if too short to contain an ICMPv6 header */
+	if (len < sizeof(*hdr))
 		return;
 
 	/* For relay mode, just forward RS and RA between interfaces */
