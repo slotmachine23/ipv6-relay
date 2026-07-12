@@ -116,10 +116,17 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (getuid() != 0) {
-		error("Must be run as root!");
-		return 2;
-	}
+	/*
+	 * Raw sockets, netlink route operations and privileged UDP ports
+	 * (DHCPv6 547) are required. Running as root is the simplest way to
+	 * get them, but an unprivileged user also works as long as it has
+	 * been granted CAP_NET_RAW, CAP_NET_ADMIN and CAP_NET_BIND_SERVICE
+	 * (e.g. via systemd AmbientCapabilities=). Individual socket/bind/
+	 * setsockopt failures are already reported by their call sites, so
+	 * we only warn here instead of hard-failing on non-root uid.
+	 */
+	if (getuid() != 0)
+		error("Not running as root - relying on CAP_NET_RAW/CAP_NET_ADMIN/CAP_NET_BIND_SERVICE");
 
 	if (!config.config_file) {
 		error("No configuration file specified. Use -c <file>");

@@ -112,6 +112,13 @@ sudo cp config.json.example /etc/ipv6-relay/config.json
 sudo editor /etc/ipv6-relay/config.json
 ```
 
+配置文件本身不包含任何密钥/凭据，只有接口名和开关，所以给普通用户读权限没有安全风险：
+
+```bash
+sudo chmod 755 /etc/ipv6-relay
+sudo chmod 644 /etc/ipv6-relay/config.json
+```
+
 配置文件示例：
 
 ```json
@@ -157,7 +164,10 @@ sudo journalctl -u ipv6-relay -f
 
 ### 注意事项
 
-- 必须以 root 权限运行（需要操作原始套接字和网络接口）。
+- 进程本身不再强制要求以 UID 0 运行；`systemd` 单元默认以 `nobody` 用户运行，通过 `AmbientCapabilities`（`CAP_NET_RAW` + `CAP_NET_ADMIN` + `CAP_NET_BIND_SERVICE`）获得操作原始套接字、netlink 路由表和绑定 DHCPv6 547 端口所需的权限，不需要完整 root。
+- 如果不通过 systemd、而是手动在命令行执行 `ipv6-relay`，仍然需要 root（或者自行用 `setcap` 给二进制加上同样三个 capability 后再以非 root 用户运行）。
+- 已在测试机上验证：`nobody` 用户 + 上述三个 capability 可以正常完成 DHCPv6 中继（绑定 547 端口）、RA 中继（原始套接字）、NDP 中继（写 `/proc/sys/net/ipv6/conf/<if>/proxy_ndp` 需要 `CAP_NET_ADMIN`）。
+- 注意：systemd 会对使用 `nobody`/`nogroup` 这种"通用"账户运行服务发出警告（`Special user nobody configured, this is not safe!`），因为它是共享账户，理论上多个服务共用同一 UID 存在互相干扰的风险。如果更看重隔离性，可以自建专用系统账户（如 `useradd -r -s /sbin/nologin ipv6-relay`）并把 `User=`/`Group=` 改成该账户，原理相同。
 - 确保内核已启用 IPv6。
 - 检查防火墙是否放行 ICMPv6 / DHCPv6 流量。
 

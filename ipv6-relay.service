@@ -10,5 +10,14 @@ RestartSec=5
 ExecStart=/usr/sbin/ipv6-relay -c /etc/ipv6-relay/config.json
 ExecReload=/bin/kill -HUP $MAINPID
 
+# Run unprivileged: raw sockets, netlink route access and binding to the
+# privileged DHCPv6 port (547) are granted via ambient capabilities instead
+# of root. /etc/ipv6-relay/config.json must remain world-readable (or
+# readable by this user/group) for this to work - see README.
+User=nobody
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
 [Install]
 WantedBy=multi-user.target
