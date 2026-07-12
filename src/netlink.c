@@ -656,18 +656,22 @@ static int cb_linklocal_valid(struct nl_msg *msg, void *arg)
 	if (!IN6_IS_ADDR_LINKLOCAL(&addr))
 		return NL_SKIP;
 
-	oaddrs = realloc(*(ctxt->oaddrs), sizeof(*oaddrs) * (ctxt->ret + 1));
-	if (!oaddrs)
-		return NL_SKIP;
+	/* oaddrs may be NULL when the caller only wants a count */
+	if (ctxt->oaddrs) {
+		oaddrs = realloc(*(ctxt->oaddrs), sizeof(*oaddrs) * (ctxt->ret + 1));
+		if (!oaddrs)
+			return NL_SKIP;
 
-	memset(&oaddrs[ctxt->ret], 0, sizeof(oaddrs[ctxt->ret]));
-	memcpy(&oaddrs[ctxt->ret].addr, &addr, sizeof(oaddrs[ctxt->ret].addr));
+		memset(&oaddrs[ctxt->ret], 0, sizeof(oaddrs[ctxt->ret]));
+		memcpy(&oaddrs[ctxt->ret].addr, &addr, sizeof(oaddrs[ctxt->ret].addr));
 
-	if (ifa->ifa_flags & IFA_F_TENTATIVE)
-		oaddrs[ctxt->ret].tentative = true;
+		if (ifa->ifa_flags & IFA_F_TENTATIVE)
+			oaddrs[ctxt->ret].tentative = true;
+
+		*(ctxt->oaddrs) = oaddrs;
+	}
 
 	ctxt->ret++;
-	*(ctxt->oaddrs) = oaddrs;
 
 	return NL_OK;
 }

@@ -221,39 +221,45 @@ int uloop_timeout_remaining(struct uloop_timeout *timeout);
 int uloop_signal_add(struct uloop_signal *s);
 
 /* === utils replacement === */
+/*
+ * calloc_a(size, [void **ptr, size_t extra_len, ...], NULL)
+ *
+ * Allocates a single zeroed buffer of (size + sum of extra_len) bytes,
+ * returns a pointer to the start, and writes sub-region pointers into each
+ * caller-supplied void** variable.  Mirrors the libubox calloc_a() API.
+ */
 static inline void *calloc_a(size_t len, ...)
 {
-	void **mem;
-	size_t count = 1, total = len;
+	void **arg;
+	void *buf;
+	char *ptr;
+	size_t total = len;
 	va_list ap;
 
+	/* First pass: sum up total allocation size */
 	va_start(ap, len);
-	while ((mem = va_arg(ap, void **))) {
+	while ((arg = va_arg(ap, void **)) != NULL) {
 		size_t l = va_arg(ap, size_t);
 		total += l;
-		count++;
 	}
 	va_end(ap);
 
-	mem = calloc(1, total + count * sizeof(void *));
-	if (!mem)
+	buf = calloc(1, total);
+	if (!buf)
 		return NULL;
 
-	char *ptr = (char *)&mem[count];
-	void **m = mem;
+	ptr = (char *)buf + len;
 
+	/* Second pass: assign sub-region pointers to caller's variables */
 	va_start(ap, len);
-	*m++ = memcpy(ptr, &len, 0) ? NULL : ptr;
-	ptr += len;
-
-	while ((mem = va_arg(ap, void **))) {
+	while ((arg = va_arg(ap, void **)) != NULL) {
 		size_t l = va_arg(ap, size_t);
-		*m++ = memcpy(ptr, &l, 0) ? NULL : ptr;
+		*arg = ptr;
 		ptr += l;
 	}
 	va_end(ap);
 
-	return mem[0];
+	return buf;
 }
 
 #endif /* _COMPAT_H_ */

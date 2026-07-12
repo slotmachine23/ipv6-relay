@@ -19,10 +19,24 @@
 #include "compat.h"
 
 static int epoll_fd = -1;
+static int signal_fd = -1;
 static volatile bool uloop_cancelled = false;
 
 /* Signal handling */
 static struct uloop_signal *signal_handlers[32] = {NULL};
+
+/*
+ * epoll data.ptr tagging scheme:
+ *   bit 0 == 0  →  struct uloop_fd *   (regular I/O fd)
+ *   bit 0 == 1  →  struct uloop_timeout * (timerfd), strip bit before use
+ *   ptr == &signal_sentinel  →  signalfd event
+ */
+#define TIMEOUT_TAG    ((uintptr_t)1)
+#define is_timeout_ptr(p)    ((uintptr_t)(p) & TIMEOUT_TAG)
+#define timeout_to_ptr(t)    ((void *)((uintptr_t)(t) | TIMEOUT_TAG))
+#define ptr_to_timeout(p)    ((struct uloop_timeout *)((uintptr_t)(p) & ~TIMEOUT_TAG))
+
+static char signal_sentinel; /* unique address used as signalfd marker */
 
 int uloop_init(void)
 {
@@ -38,12 +52,35 @@ int uloop_init(void)
 	sigaddset(&mask, SIGHUP);
 	sigprocmask(SIG_BLOCK, &mask, NULL);
 
+	/* Create signalfd and watch it in epoll */
+	signal_fd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
+	if (signal_fd < 0) {
+		close(epoll_fd);
+		epoll_fd = -1;
+		return -1;
+	}
+
+	struct epoll_event ev = {
+		.events  = EPOLLIN,
+		.data.ptr = &signal_sentinel,
+	};
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, signal_fd, &ev) < 0) {
+		close(signal_fd); signal_fd = -1;
+		close(epoll_fd);  epoll_fd  = -1;
+		return -1;
+	}
+
 	uloop_cancelled = false;
 	return 0;
 }
 
 void uloop_done(void)
 {
+	if (signal_fd >= 0) {
+		close(signal_fd);
+		signal_fd = -1;
+	}
+
 	if (epoll_fd >= 0) {
 		close(epoll_fd);
 		epoll_fd = -1;
@@ -97,6 +134,17 @@ static int update_timer(struct uloop_timeout *timeout)
 		timeout->timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
 		if (timeout->timerfd < 0)
 			return -1;
+
+		/* Register the new timerfd with epoll using tagged ptr */
+		struct epoll_event ev = {
+			.events   = EPOLLIN,
+			.data.ptr = timeout_to_ptr(timeout),
+		};
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, timeout->timerfd, &ev) < 0) {
+			close(timeout->timerfd);
+			timeout->timerfd = -1;
+			return -1;
+		}
 	}
 
 	struct itimerspec its = {0};
@@ -173,21 +221,28 @@ int uloop_timeout_remaining(struct uloop_timeout *timeout)
 	return msecs > 0 ? msecs : 0;
 }
 
-static void dispatch_signals(void)
-{
-	for (size_t i = 0; i < sizeof(signal_handlers)/sizeof(signal_handlers[0]); i++) {
-		if (signal_handlers[i]) {
-			signal_handlers[i]->cb(signal_handlers[i]);
-		}
-	}
-}
-
 int uloop_signal_add(struct uloop_signal *s)
 {
 	if (s->signo < 0 || s->signo >= (int)(sizeof(signal_handlers)/sizeof(signal_handlers[0])))
 		return -1;
 
 	signal_handlers[s->signo] = s;
+
+	/* Re-create the signalfd so it covers the newly registered signal.
+	 * The signal must already be blocked (uloop_init blocks the standard set).
+	 * For other signals, block them now. */
+	sigset_t mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGTERM);
+	sigaddset(&mask, SIGHUP);
+	sigaddset(&mask, s->signo);
+	sigprocmask(SIG_BLOCK, &mask, NULL);
+
+	if (signal_fd >= 0) {
+		signalfd(signal_fd, &mask, SFD_NONBLOCK);
+	}
+
 	return 0;
 }
 
@@ -206,19 +261,35 @@ int uloop_run(void)
 		for (int i = 0; i < nfds; i++) {
 			void *ptr = events[i].data.ptr;
 
-			/* Check if this is a uloop_fd */
-			if (ptr) {
-				struct uloop_fd *fd = ptr;
-
-				/* Check for timerfd */
-				if (fd->cb) {
-					fd->cb(fd, events[i].events);
+			if (ptr == &signal_sentinel) {
+				/* Read all pending signals and dispatch handlers */
+				struct signalfd_siginfo si;
+				while (read(signal_fd, &si, sizeof(si)) == sizeof(si)) {
+					unsigned signo = si.ssi_signo;
+					if (signo == SIGINT || signo == SIGTERM) {
+						uloop_cancelled = true;
+					} else if (signo < sizeof(signal_handlers)/sizeof(signal_handlers[0]) &&
+						   signal_handlers[signo]) {
+						signal_handlers[signo]->cb(signal_handlers[signo]);
+					}
 				}
+			} else if (is_timeout_ptr(ptr)) {
+				/* timerfd fired */
+				struct uloop_timeout *t = ptr_to_timeout(ptr);
+				/* Drain the timerfd */
+				uint64_t exp;
+				read(t->timerfd, &exp, sizeof(exp));
+				if (t->pending && t->cb) {
+					t->pending = false;
+					t->cb(t);
+				}
+			} else if (ptr) {
+				/* Regular I/O fd */
+				struct uloop_fd *fd = ptr;
+				if (fd->cb)
+					fd->cb(fd, events[i].events);
 			}
 		}
-
-		/* Dispatch any pending signals */
-		dispatch_signals();
 	}
 
 	return 0;
