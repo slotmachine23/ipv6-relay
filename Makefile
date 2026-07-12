@@ -4,6 +4,9 @@
 CROSS_COMPILE ?=
 CC = $(CROSS_COMPILE)gcc
 
+# Build output directory
+BUILD_DIR ?= build
+
 CFLAGS ?= -O2 -g
 CFLAGS += -Wall -Wextra -Werror=implicit-function-declaration \
           -Wformat -Werror=format-security -Werror=format-nonliteral \
@@ -24,8 +27,9 @@ SRCS = src/ipv6_relay.c \
        src/netlink.c \
        src/router.c
 
-OBJS = $(SRCS:.c=.o)
-TARGET = ipv6-relay
+# Object files inside build directory
+OBJS = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRCS))
+TARGET = $(BUILD_DIR)/ipv6-relay
 
 # Installation directories
 PREFIX ?= /usr
@@ -33,18 +37,43 @@ BINDIR = $(PREFIX)/sbin
 SYSCONFDIR ?= /etc
 UNITDIR ?= $(PREFIX)/lib/systemd/system
 
-.PHONY: all clean install install-deb
+.PHONY: all clean install install-deb check-cross
+
+# Detect broken cross-compilation environments early
+ifeq ($(CROSS_COMPILE),)
+  # Native build — no extra checks needed
+else
+  SYSROOT := $(shell $(CC) -print-sysroot 2>/dev/null)
+  SYSROOT_TIME_H := $(wildcard $(SYSROOT)/usr/include/time.h)
+  ifeq ($(SYSROOT_TIME_H),)
+    SYSROOT_TIME_H := $(wildcard $(SYSROOT)/include/time.h)
+  endif
+  ifeq ($(SYSROOT_TIME_H),)
+    $(error Cross-compiler sysroot is missing C library headers (e.g. time.h). \
+            Sysroot path: $(SYSROOT). \
+            Please install the matching aarch64 glibc/sysroot package for your distribution, \
+            or point SYSROOT to a valid root filesystem with: make CROSS_COMPILE=$(CROSS_COMPILE) SYSROOT=/path/to/rootfs)
+  endif
+  # Pass sysroot through if the user provided one
+  ifdef SYSROOT
+    CFLAGS += --sysroot=$(SYSROOT)
+    LDFLAGS += --sysroot=$(SYSROOT)
+  endif
+endif
 
 all: $(TARGET)
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
 
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-%.o: %.c
+$(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -rf $(BUILD_DIR)
 
 install: $(TARGET)
 	install -d $(DESTDIR)$(BINDIR)

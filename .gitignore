@@ -1,0 +1,18 @@
+# Build output directory
+build/
+
+# Object files (fallback if built outside build/)
+*.o
+
+# Binary
+ipv6-relay
+
+# Editor/IDE
+.vscode/
+*.swp
+*.swo
+*~
+
+# Core dumps
+core
+core.*
