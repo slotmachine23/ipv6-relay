@@ -1,0 +1,14 @@
+[Unit]
+Description=IPv6 Relay Daemon for %i
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=5
+ExecStart=/usr/sbin/ipv6-relay -c /etc/ipv6-relay/%i.json
+ExecReload=/bin/kill -HUP $MAINPID
+
+[Install]
+WantedBy=multi-user.target

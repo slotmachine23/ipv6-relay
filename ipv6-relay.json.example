@@ -1,0 +1,23 @@
+{
+  "global": {
+    "log_level": 5
+  },
+  "interfaces": {
+    "lan": {
+      "ifname": "eth1",
+      "ra": "relay",
+      "dhcpv6": "relay",
+      "ndp": "relay"
+    },
+    "wan": {
+      "ifname": "eth0",
+      "ra": "relay",
+      "dhcpv6": "relay",
+      "ndp": "relay",
+      "master": true,
+      "dhcpv6_relay_servers": [
+        "2001:db8::1"
+      ]
+    }
+  }
+}
