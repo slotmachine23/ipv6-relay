@@ -22,6 +22,7 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <netinet/ip6.h>
+#include <netpacket/packet.h>
 #include <linux/netlink.h>
 
 #include <sys/socket.h>
@@ -345,6 +346,7 @@ static void odhcpd_receive_packets(struct uloop_fd *u, _o_unused unsigned int ev
 	uint8_t data_buf[8192], cmsg_buf[128];
 	union {
 		struct sockaddr_in6 in6;
+		struct sockaddr_ll ll;
 		struct sockaddr_nl nl;
 	} addr;
 
@@ -403,6 +405,10 @@ static void odhcpd_receive_packets(struct uloop_fd *u, _o_unused unsigned int ev
 		/* Check hoplimit if received */
 		if (hlim && *hlim != 255)
 			continue;
+
+		/* Detect interface for packet sockets */
+		if (addr.ll.sll_family == AF_PACKET)
+			destiface = addr.ll.sll_ifindex;
 
 		/* From netlink */
 		if (addr.nl.nl_family == AF_NETLINK) {

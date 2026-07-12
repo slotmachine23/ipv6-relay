@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <string.h>
 #include <errno.h>
 
 #include <fcntl.h>
@@ -29,6 +30,7 @@
 static void ndp_netevent_cb(unsigned long event, struct netevent_handler_info *info);
 static void setup_route(struct in6_addr *addr, struct interface *iface, bool add);
 static void setup_addr_for_relaying(struct in6_addr *addr, struct interface *iface, bool add);
+static void relay_ping(const struct in6_addr *target, struct interface *iface);
 static void handle_solicit(void *addr, void *data, size_t len,
 		struct interface *iface, void *dest);
 
@@ -129,6 +131,68 @@ int ndp_setup_interface(struct interface *iface, bool enable)
 	}
 
 	if (enable) {
+		int val = 2;
+		struct icmp6_filter filt;
+		struct sockaddr_ll ll;
+		struct packet_mreq mreq;
+
+		/*
+		 * ICMPv6 raw socket used purely for transmitting: relay_ping()
+		 * sends an Echo Request to a solicited target out this
+		 * interface to actively resolve (and thereby learn) the
+		 * neighbor. Previously ndp_ping_fd was left at -1, so every
+		 * send in the solicit path silently failed with EBADF and the
+		 * daemon could only ever learn downstream hosts that happened
+		 * to originate their own traffic - inbound-initiated resolution
+		 * (a WAN host reaching a so-far-unseen LAN client) never worked.
+		 */
+		iface->ndp_ping_fd = socket(AF_INET6, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_ICMPV6);
+		if (iface->ndp_ping_fd < 0) {
+			error("socket(AF_INET6): %m");
+			ret = -1;
+			goto out;
+		}
+
+		if (setsockopt(iface->ndp_ping_fd, SOL_SOCKET, SO_BINDTODEVICE,
+				iface->ifname, strlen(iface->ifname)) < 0) {
+			error("setsockopt(SO_BINDTODEVICE): %m");
+			ret = -1;
+			goto out;
+		}
+
+		/* Let the kernel compute our checksums */
+		if (setsockopt(iface->ndp_ping_fd, IPPROTO_RAW, IPV6_CHECKSUM,
+				&val, sizeof(val)) < 0) {
+			error("setsockopt(IPV6_CHECKSUM): %m");
+			ret = -1;
+			goto out;
+		}
+
+		/* This is required by RFC 4861 */
+		val = 255;
+		if (setsockopt(iface->ndp_ping_fd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS,
+				&val, sizeof(val)) < 0) {
+			error("setsockopt(IPV6_MULTICAST_HOPS): %m");
+			ret = -1;
+			goto out;
+		}
+
+		if (setsockopt(iface->ndp_ping_fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS,
+				&val, sizeof(val)) < 0) {
+			error("setsockopt(IPV6_UNICAST_HOPS): %m");
+			ret = -1;
+			goto out;
+		}
+
+		/* We only ever transmit on this socket, so drop everything received */
+		ICMP6_FILTER_SETBLOCKALL(&filt);
+		if (setsockopt(iface->ndp_ping_fd, IPPROTO_ICMPV6, ICMP6_FILTER,
+				&filt, sizeof(filt)) < 0) {
+			error("setsockopt(ICMP6_FILTER): %m");
+			ret = -1;
+			goto out;
+		}
+
 		iface->ndp_event.uloop.fd = socket(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC,
 				htons(ETH_P_IPV6));
 		if (iface->ndp_event.uloop.fd < 0) {
@@ -141,8 +205,82 @@ int ndp_setup_interface(struct interface *iface, bool enable)
 			goto out;
 		}
 
+#ifdef PACKET_RECV_TYPE
+		/*
+		 * Only care about multicast frames (neighbor solicitations to
+		 * the solicited-node group). Excluding our own outgoing frames
+		 * (PACKET_OUTGOING) is what keeps relay_ping() from looping:
+		 * the temporary /128 route it installs makes the kernel emit a
+		 * neighbor solicitation of its own, which we must not re-process.
+		 */
+		int pktt = 1 << PACKET_MULTICAST;
+		if (setsockopt(iface->ndp_event.uloop.fd, SOL_PACKET, PACKET_RECV_TYPE,
+				&pktt, sizeof(pktt)) < 0) {
+			error("setsockopt(PACKET_RECV_TYPE): %m");
+			ret = -1;
+			goto out;
+		}
+#endif
+
+		/*
+		 * AF_PACKET sockets start receiving as soon as they exist, so
+		 * install a drop-all filter, drain anything already queued, and
+		 * only then swap in the real neighbor-solicitation filter. This
+		 * avoids a startup race where stray frames slip through before
+		 * the filter is in place.
+		 */
+		if (setsockopt(iface->ndp_event.uloop.fd, SOL_SOCKET, SO_ATTACH_FILTER,
+				&bpf_drop, sizeof(bpf_drop)) < 0) {
+			error("setsockopt(SO_ATTACH_FILTER): %m");
+			ret = -1;
+			goto out;
+		}
+
+		while (true) {
+			char null[1];
+			if (recv(iface->ndp_event.uloop.fd, null, sizeof(null),
+					MSG_DONTWAIT | MSG_TRUNC) < 0)
+				break;
+		}
+
 		if (setsockopt(iface->ndp_event.uloop.fd, SOL_SOCKET, SO_ATTACH_FILTER,
 				&bpf_prog, sizeof(bpf_prog)) < 0) {
+			error("setsockopt(SO_ATTACH_FILTER): %m");
+			ret = -1;
+			goto out;
+		}
+
+		/*
+		 * Bind to the interface so this socket only ever sees frames
+		 * from its own segment. Without the bind every interface's
+		 * capture socket receives every interface's IPv6 frames, which
+		 * would dispatch handle_solicit() against the wrong interface.
+		 */
+		memset(&ll, 0, sizeof(ll));
+		ll.sll_family = AF_PACKET;
+		ll.sll_ifindex = iface->ifindex;
+		ll.sll_protocol = htons(ETH_P_IPV6);
+
+		if (bind(iface->ndp_event.uloop.fd, (struct sockaddr *)&ll, sizeof(ll)) < 0) {
+			error("bind(): %m");
+			ret = -1;
+			goto out;
+		}
+
+		/*
+		 * Enable all-multicast so we receive solicited-node multicast
+		 * frames for addresses the local stack itself has not joined -
+		 * i.e. neighbor solicitations aimed at the downstream hosts we
+		 * relay for.
+		 */
+		memset(&mreq, 0, sizeof(mreq));
+		mreq.mr_ifindex = iface->ifindex;
+		mreq.mr_type = PACKET_MR_ALLMULTI;
+		mreq.mr_alen = ETH_ALEN;
+
+		if (setsockopt(iface->ndp_event.uloop.fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP,
+				&mreq, sizeof(mreq)) < 0) {
+			error("setsockopt(PACKET_ADD_MEMBERSHIP): %m");
 			ret = -1;
 			goto out;
 		}
@@ -169,10 +307,46 @@ out:
 		iface->ndp_event.uloop.fd = -1;
 	}
 
+	if (ret < 0 && iface->ndp_ping_fd >= 0) {
+		close(iface->ndp_ping_fd);
+		iface->ndp_ping_fd = -1;
+	}
+
 	if (dump_neigh)
 		netlink_dump_neigh_table(true);
 
 	return ret;
+}
+
+/*
+ * Send an ICMPv6 Echo Request to a solicited target out a single relay
+ * interface. This is not about reachability testing but about making the
+ * kernel resolve - and therefore learn - the target's neighbor entry on the
+ * interface it actually lives behind. Once learned, ndp_netevent_cb() mirrors
+ * it into a proxy-NDP entry (on the other relay interfaces) plus a host route.
+ */
+static void relay_ping(const struct in6_addr *target, struct interface *iface)
+{
+	struct sockaddr_in6 dest = { .sin6_family = AF_INET6, .sin6_addr = *target };
+	struct icmp6_hdr echo = { .icmp6_type = ICMP6_ECHO_REQUEST };
+	struct iovec iov = { .iov_base = &echo, .iov_len = sizeof(echo) };
+
+	if (iface->ndp_ping_fd < 0)
+		return;
+
+	/*
+	 * Pin a temporary /128 route for the target via this interface so the
+	 * echo egresses here: the shared prefix's on-link route points at a
+	 * different interface, so without this the kernel would try (and fail)
+	 * to resolve the target there instead of where it really is. The route
+	 * only needs to exist for the duration of the synchronous sendmsg();
+	 * the persistent mirror route (metric 1024) is installed separately
+	 * once the neighbor is learned, so removing this higher-priority
+	 * metric-128 entry afterwards is safe.
+	 */
+	netlink_setup_route(target, 128, iface->ifindex, NULL, 128, true);
+	odhcpd_try_send_with_src(iface->ndp_ping_fd, &dest, &iov, 1, iface);
+	netlink_setup_route(target, 128, iface->ifindex, NULL, 128, false);
 }
 
 /* Handle solicitations */
@@ -183,38 +357,59 @@ static void handle_solicit(void *addr, void *data, size_t len,
 	struct ip6_hdr *ip6 = data;
 	struct nd_neighbor_solicit *req = (struct nd_neighbor_solicit *)&ip6[1];
 	struct sockaddr_ll *sll = addr;
+	struct interface *c;
+	uint8_t mac[6];
 
-	/* Don't forward definite duplicate */
-	if (ip6->ip6_hlim != 255)
+	if (iface->ndp != MODE_RELAY)
 		return;
 
-	/* Only use first address in list */
-	if (!IN6_IS_ADDR_MULTICAST(&req->nd_ns_target) &&
-			req->nd_ns_target.s6_addr32[0] != htonl(0xff000000)) {
-		struct interface *c;
+	if (len < sizeof(*ip6) + sizeof(*req))
+		return; /* Truncated */
 
-		avl_for_each_element(&interfaces, c, avl) {
-			if (!c->master || c->ndp != MODE_RELAY || c->ifindex == sll->sll_ifindex)
-				continue;
+	/* A solicitation from the unspecified address is a DAD probe. */
+	bool ns_is_dad = IN6_IS_ADDR_UNSPECIFIED(&ip6->ip6_src);
 
-			if (!IN6_IS_ADDR_UNSPECIFIED(&ip6->ip6_src) &&
-					IN6_IS_ADDR_LINKLOCAL(&ip6->ip6_src)) {
-				odhcpd_send_with_src(iface->ndp_ping_fd,
-						&(struct sockaddr_in6) {
-							AF_INET6, 0, 0,
-							IN6ADDR_LINKLOCAL_ALLNODES_INIT,
-							c->ifindex
-						}, &(struct iovec) {ip6, len}, 1, c,
-						&ip6->ip6_src);
-			} else {
-				odhcpd_send(iface->ndp_ping_fd,
-						&(struct sockaddr_in6) {
-							AF_INET6, 0, 0,
-							IN6ADDR_LINKLOCAL_ALLNODES_INIT,
-							c->ifindex
-						}, &(struct iovec) {ip6, len}, 1, c);
-			}
-		}
+	/* Only forward DAD probes for external interfaces. */
+	if (iface->external && !ns_is_dad)
+		return;
+
+	/*
+	 * RFC 4861 §7.1.1: silently discard a Neighbor Solicitation whose IP
+	 * Hop Limit is not 255 or whose ICMP Code is non-zero. The hop-limit
+	 * check is what prevents off-link attackers from forging NS/DAD; since
+	 * we capture on an AF_PACKET socket (not a kernel-managed ICMPv6
+	 * socket) we have to enforce it ourselves.
+	 */
+	if (ip6->ip6_hlim != 255 || req->nd_ns_code != 0)
+		return;
+
+	/* Nothing to learn for link-local/loopback/multicast targets. */
+	if (IN6_IS_ADDR_LINKLOCAL(&req->nd_ns_target) ||
+			IN6_IS_ADDR_LOOPBACK(&req->nd_ns_target) ||
+			IN6_IS_ADDR_MULTICAST(&req->nd_ns_target))
+		return;
+
+	/*
+	 * Ignore a solicitation we ourselves emitted that looped back on a
+	 * non-master interface. Self-sent NS on a master interface are kept:
+	 * they are exactly how inbound traffic for a not-yet-learned
+	 * downstream host announces itself (the kernel tries to resolve the
+	 * target over the shared prefix's on-link route), and we want to react
+	 * by resolving it out the downstream interface.
+	 */
+	odhcpd_get_mac(iface, mac);
+	if (!memcmp(sll->sll_addr, mac, sizeof(mac)) && !iface->master)
+		return;
+
+	/*
+	 * Actively resolve the target on every other relay interface; whichever
+	 * one the host actually sits behind will learn it and trigger the
+	 * proxy/host-route mirror in ndp_netevent_cb().
+	 */
+	avl_for_each_element(&interfaces, c, avl) {
+		if (c != iface && c->ndp == MODE_RELAY &&
+				(ns_is_dad || !c->external))
+			relay_ping(&req->nd_ns_target, c);
 	}
 }
 
