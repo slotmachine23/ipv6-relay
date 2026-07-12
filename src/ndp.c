@@ -268,11 +268,6 @@ static void ndp_netevent_cb(unsigned long event, struct netevent_handler_info *i
 		struct interface *iface = info->iface;
 		struct in6_addr *addr = &info->neigh.dst.in6;
 		struct mirrored_neigh *m;
-		/* Only consider neighbor entries that are actually resolved;
-		 * treat INCOMPLETE/FAILED the same as a deletion. */
-		bool resolved = (event == NETEV_NEIGH6_ADD) &&
-			(info->neigh.state & (NUD_REACHABLE | NUD_STALE | NUD_DELAY |
-					       NUD_PROBE | NUD_PERMANENT | NUD_NOARP));
 
 		if (!iface)
 			return;
@@ -293,34 +288,62 @@ static void ndp_netevent_cb(unsigned long event, struct netevent_handler_info *i
 		 * interface that actually learned it, exactly as already done
 		 * for locally-assigned addresses above.
 		 *
-		 * Only act on an actual appear/disappear transition (tracked
-		 * via mirrored_neighs), not on every intermediate NUD state
-		 * change of an already-mirrored neighbor: kernel neighbor
-		 * entries for hosts whose traffic is merely being forwarded
-		 * (rather than locally originated/terminated) don't get the
-		 * usual "confirmed reachable" feedback, so they cycle through
-		 * STALE/DELAY/PROBE roughly every base_reachable_time even
-		 * while the host is continuously active. Re-issuing the
-		 * route/proxy netlink calls on every such cycle was observed
-		 * to itself cause multi-second forwarding stalls for that
-		 * host, which is worse than the harmless aging it reacted to.
+		 * The mirror is tracked in mirrored_neighs so we only touch the
+		 * kernel on real transitions, never on the benign
+		 * STALE/DELAY/PROBE/REACHABLE re-confirmation cycle an
+		 * already-mirrored, forwarded-only host goes through roughly
+		 * every base_reachable_time (re-issuing the route/proxy netlink
+		 * calls on every such cycle was observed to itself cause
+		 * multi-second forwarding stalls).
+		 *
+		 * Crucially, the mirror lifetime is decoupled from the volatile
+		 * neighbor cache entry:
+		 *
+		 *  - A plain RTM_DELNEIGH (NETEV_NEIGH6_DEL) means the kernel
+		 *    merely garbage-collected an idle STALE entry after
+		 *    gc_stale_time. The downstream host is almost always still
+		 *    present (a quiet SSH/terminal session generates no traffic
+		 *    of its own), so tearing the mirror down here would blackhole
+		 *    that host's inbound/return traffic until it happens to send
+		 *    something again - observed as IPv6 "cutting in and out" for
+		 *    otherwise-idle clients. We therefore keep the mirror on
+		 *    NEIGH6_DEL and let it be re-validated on demand.
+		 *
+		 *  - Only an explicit NUD_FAILED (the kernel actively probed the
+		 *    host, exhausted its retransmits and got no answer) is
+		 *    treated as a genuine departure that reaps the mirror. This
+		 *    still bounds stale mirrors: as soon as anything tries to
+		 *    reach a host that has really left, the resulting failed
+		 *    resolution removes its proxy entry and host route.
+		 *
+		 * NUD_INCOMPLETE (first-time/in-progress resolution) is neither a
+		 * confirmation nor a failure and is ignored.
 		 */
 		m = find_mirrored_neigh(addr, iface->ifindex);
-		if (resolved && !m) {
-			m = calloc(1, sizeof(*m));
-			if (!m)
-				return;
-			m->addr = *addr;
-			m->ifindex = iface->ifindex;
-			list_add(&m->head, &mirrored_neighs);
-			setup_addr_for_relaying(addr, iface, true);
-			setup_route(addr, iface, true);
-		} else if (!resolved && m) {
-			list_del(&m->head);
-			free(m);
-			setup_addr_for_relaying(addr, iface, false);
-			setup_route(addr, iface, false);
+
+		if (event == NETEV_NEIGH6_ADD) {
+			bool resolved = info->neigh.state &
+				(NUD_REACHABLE | NUD_STALE | NUD_DELAY |
+				 NUD_PROBE | NUD_PERMANENT | NUD_NOARP);
+			bool failed = info->neigh.state & NUD_FAILED;
+
+			if (resolved && !m) {
+				m = calloc(1, sizeof(*m));
+				if (!m)
+					return;
+				m->addr = *addr;
+				m->ifindex = iface->ifindex;
+				list_add(&m->head, &mirrored_neighs);
+				setup_addr_for_relaying(addr, iface, true);
+				setup_route(addr, iface, true);
+			} else if (failed && m) {
+				list_del(&m->head);
+				free(m);
+				setup_addr_for_relaying(addr, iface, false);
+				setup_route(addr, iface, false);
+			}
 		}
+		/* NETEV_NEIGH6_DEL: keep the mirror (see comment above). */
 	}
 }
 
