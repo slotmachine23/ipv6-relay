@@ -34,6 +34,36 @@ static void handle_solicit(void *addr, void *data, size_t len,
 
 static struct netevent_handler ndp_netevent_handler = { .cb = ndp_netevent_cb, };
 
+/*
+ * Tracks downstream neighbors we've already mirrored (proxy-NDP entry +
+ * host route) so that ndp_netevent_cb() only touches the kernel when a
+ * neighbor actually appears or disappears, not on every NUD state
+ * transition (REACHABLE -> STALE -> DELAY -> PROBE -> REACHABLE, which
+ * recurs every base_reachable_time for hosts with no confirming traffic
+ * of their own). Without this, every benign reconfirmation of an
+ * existing, still-valid neighbor would trigger a redundant netlink
+ * route/proxy replace, which was observed to cause several-second
+ * forwarding stalls for that host (repeated FIB/proxy churn disrupts
+ * in-flight traffic far more than the underlying NUD aging itself does).
+ */
+struct mirrored_neigh {
+	struct list_head head;
+	struct in6_addr addr;
+	int ifindex;
+};
+static struct list_head mirrored_neighs = LIST_HEAD_INIT(mirrored_neighs);
+
+static struct mirrored_neigh *find_mirrored_neigh(const struct in6_addr *addr, int ifindex)
+{
+	struct mirrored_neigh *m;
+
+	list_for_each_entry(m, &mirrored_neighs, head)
+		if (m->ifindex == ifindex && IN6_ARE_ADDR_EQUAL(&m->addr, addr))
+			return m;
+
+	return NULL;
+}
+
 /* Initialize NDP-proxy */
 int ndp_init(void)
 {
@@ -237,13 +267,18 @@ static void ndp_netevent_cb(unsigned long event, struct netevent_handler_info *i
 	} else if (event == NETEV_NEIGH6_ADD || event == NETEV_NEIGH6_DEL) {
 		struct interface *iface = info->iface;
 		struct in6_addr *addr = &info->neigh.dst.in6;
-		/* Only mirror neighbor entries that are actually resolved;
+		struct mirrored_neigh *m;
+		/* Only consider neighbor entries that are actually resolved;
 		 * treat INCOMPLETE/FAILED the same as a deletion. */
-		bool add = (event == NETEV_NEIGH6_ADD) &&
+		bool resolved = (event == NETEV_NEIGH6_ADD) &&
 			(info->neigh.state & (NUD_REACHABLE | NUD_STALE | NUD_DELAY |
 					       NUD_PROBE | NUD_PERMANENT | NUD_NOARP));
 
 		if (!iface)
+			return;
+
+		if (!(iface->ndp == MODE_RELAY && !IN6_IS_ADDR_LOOPBACK(addr) &&
+				!IN6_IS_ADDR_MULTICAST(addr) && !IN6_IS_ADDR_LINKLOCAL(addr)))
 			return;
 
 		/*
@@ -257,11 +292,34 @@ static void ndp_netevent_cb(unsigned long event, struct netevent_handler_info *i
 		 * relayed (master) interfaces and a host route via the
 		 * interface that actually learned it, exactly as already done
 		 * for locally-assigned addresses above.
+		 *
+		 * Only act on an actual appear/disappear transition (tracked
+		 * via mirrored_neighs), not on every intermediate NUD state
+		 * change of an already-mirrored neighbor: kernel neighbor
+		 * entries for hosts whose traffic is merely being forwarded
+		 * (rather than locally originated/terminated) don't get the
+		 * usual "confirmed reachable" feedback, so they cycle through
+		 * STALE/DELAY/PROBE roughly every base_reachable_time even
+		 * while the host is continuously active. Re-issuing the
+		 * route/proxy netlink calls on every such cycle was observed
+		 * to itself cause multi-second forwarding stalls for that
+		 * host, which is worse than the harmless aging it reacted to.
 		 */
-		if (iface->ndp == MODE_RELAY && !IN6_IS_ADDR_LOOPBACK(addr) &&
-				!IN6_IS_ADDR_MULTICAST(addr) && !IN6_IS_ADDR_LINKLOCAL(addr)) {
-			setup_addr_for_relaying(addr, iface, add);
-			setup_route(addr, iface, add);
+		m = find_mirrored_neigh(addr, iface->ifindex);
+		if (resolved && !m) {
+			m = calloc(1, sizeof(*m));
+			if (!m)
+				return;
+			m->addr = *addr;
+			m->ifindex = iface->ifindex;
+			list_add(&m->head, &mirrored_neighs);
+			setup_addr_for_relaying(addr, iface, true);
+			setup_route(addr, iface, true);
+		} else if (!resolved && m) {
+			list_del(&m->head);
+			free(m);
+			setup_addr_for_relaying(addr, iface, false);
+			setup_route(addr, iface, false);
 		}
 	}
 }
