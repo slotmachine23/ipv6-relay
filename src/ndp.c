@@ -234,6 +234,35 @@ static void ndp_netevent_cb(unsigned long event, struct netevent_handler_info *i
 			if (cnt >= 0)
 				i->addr6_len = cnt;
 		}
+	} else if (event == NETEV_NEIGH6_ADD || event == NETEV_NEIGH6_DEL) {
+		struct interface *iface = info->iface;
+		struct in6_addr *addr = &info->neigh.dst.in6;
+		/* Only mirror neighbor entries that are actually resolved;
+		 * treat INCOMPLETE/FAILED the same as a deletion. */
+		bool add = (event == NETEV_NEIGH6_ADD) &&
+			(info->neigh.state & (NUD_REACHABLE | NUD_STALE | NUD_DELAY |
+					       NUD_PROBE | NUD_PERMANENT | NUD_NOARP));
+
+		if (!iface)
+			return;
+
+		/*
+		 * When ND resolves a downstream host's address on a relayed
+		 * interface (e.g. a LAN client that SLAAC'd an address out of
+		 * a prefix relayed from WAN), that address is otherwise
+		 * unreachable: the kernel's on-link route for the shared
+		 * prefix points at the WAN interface, and WAN-side hosts have
+		 * no way to resolve the LAN host's link-layer address. Mirror
+		 * the learned neighbor into a proxy-NDP entry on the other
+		 * relayed (master) interfaces and a host route via the
+		 * interface that actually learned it, exactly as already done
+		 * for locally-assigned addresses above.
+		 */
+		if (iface->ndp == MODE_RELAY && !IN6_IS_ADDR_LOOPBACK(addr) &&
+				!IN6_IS_ADDR_MULTICAST(addr) && !IN6_IS_ADDR_LINKLOCAL(addr)) {
+			setup_addr_for_relaying(addr, iface, add);
+			setup_route(addr, iface, add);
+		}
 	}
 }
 
