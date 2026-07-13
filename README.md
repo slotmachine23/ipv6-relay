@@ -63,7 +63,7 @@ make CROSS_COMPILE=aarch64-linux-gnu-
 make CROSS_COMPILE=aarch64-linux-gnu- SYSROOT=/usr/aarch64-linux-gnu/sys-root
 ```
 
-### RHEL 10 上编译 aarch64（实测可行）
+### RHEL 10 上编译 aarch64
 
 RHEL 10 的官方仓库（含 CodeReady Builder）不提供 aarch64 目标的 glibc/libnl/json-c 开发包，EPEL 里的 `gcc-aarch64-linux-gnu` 也只有编译器、没有对应的 sysroot。以下步骤用 CentOS Stream 10 的公开 aarch64 仓库把这些库单独装进一个空目录里作为 sysroot，实测编译通过：
 
