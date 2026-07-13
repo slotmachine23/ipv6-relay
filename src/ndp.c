@@ -193,8 +193,32 @@ int ndp_setup_interface(struct interface *iface, bool enable)
 			goto out;
 		}
 
+		/*
+		 * Bind with protocol ETH_P_ALL, not ETH_P_IPV6.
+		 *
+		 * The kernel only ever invokes the "outgoing frame" NIT tap
+		 * (dev_queue_xmit_nit(), used for locally-transmitted/self-
+		 * sent frames - see PACKET_RECV_TYPE / PACKET_OUTGOING below)
+		 * for packet sockets registered against ETH_P_ALL. A packet
+		 * socket bound to a specific protocol such as ETH_P_IPV6 is
+		 * only ever fed from netif_receive_skb(), i.e. genuinely
+		 * incoming frames - self-generated frames the local machine
+		 * transmits are invisible to it no matter how PACKET_RECV_TYPE
+		 * is configured. This was verified experimentally: a minimal
+		 * ETH_P_IPV6 socket never observes the kernel's self-generated
+		 * neighbor solicitations, while the identical socket bound to
+		 * ETH_P_ALL does.
+		 *
+		 * We still only want IPv6 neighbor solicitations, so the BPF
+		 * filter below (bpf_prog) does the real protocol/type
+		 * filtering; with SOCK_DGRAM the datagram delivered to
+		 * userspace never includes the link-layer header regardless of
+		 * which protocol matched, so the filter's fixed offsets
+		 * (assuming an IPv6 header at offset 0) remain correct for the
+		 * frames that pass it.
+		 */
 		iface->ndp_event.uloop.fd = socket(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC,
-				htons(ETH_P_IPV6));
+				htons(ETH_P_ALL));
 		if (iface->ndp_event.uloop.fd < 0) {
 			ret = -1;
 			goto out;
@@ -207,13 +231,48 @@ int ndp_setup_interface(struct interface *iface, bool enable)
 
 #ifdef PACKET_RECV_TYPE
 		/*
-		 * Only care about multicast frames (neighbor solicitations to
-		 * the solicited-node group). Excluding our own outgoing frames
-		 * (PACKET_OUTGOING) is what keeps relay_ping() from looping:
-		 * the temporary /128 route it installs makes the kernel emit a
-		 * neighbor solicitation of its own, which we must not re-process.
+		 * We want multicast frames (neighbor solicitations to the
+		 * solicited-node group) - including ones *we* transmit, not
+		 * just ones we receive from the wire.
+		 *
+		 * A frame the local machine itself puts on the wire is always
+		 * classified PACKET_OUTGOING by AF_PACKET, *regardless* of its
+		 * L2/L3 destination being multicast - PACKET_MULTICAST/
+		 * PACKET_HOST/etc classification only ever applies to frames
+		 * genuinely received from elsewhere. So a mask of only
+		 * "1 << PACKET_MULTICAST" (as used here previously) silently
+		 * discards every self-generated NS, on every interface,
+		 * without exception.
+		 *
+		 * That includes the self-generated NS handle_solicit() below
+		 * explicitly says it wants to keep on a master (upstream)
+		 * interface: when inbound traffic for a not-yet-learned
+		 * downstream host arrives, the kernel's own routing lookup
+		 * resolves it via the shared prefix's on-link route *on the
+		 * master interface itself* and emits exactly such a
+		 * self-originated NS there - this is the primary way an
+		 * inbound-initiated (host never spoke to us first) downstream
+		 * client ever gets its proxy-NDP/host-route mirror set up.
+		 * With PACKET_OUTGOING excluded, that NS was silently dropped
+		 * by this filter before ever reaching handle_solicit(), so the
+		 * mirror was simply never created: the client kept a working
+		 * link-local neighbor entry (plain L2 traffic on its own LAN
+		 * segment) while its global address stayed forever unreachable
+		 * from the outside - i.e. "got an address via SLAAC/DHCPv6 but
+		 * has no working IPv6 connectivity", surfacing only for hosts
+		 * that never happen to be the target of a genuine externally-
+		 * originated NS first.
+		 *
+		 * Adding PACKET_OUTGOING restores that intended behavior. It
+		 * does not reopen the recursive-loop this filter was
+		 * originally introduced to prevent (relay_ping()'s own /128
+		 * probe route causing an NS on the *downstream* interface it
+		 * probes): handle_solicit() already discards a self-sent NS
+		 * whose source MAC matches our own precisely when the
+		 * receiving interface is not the master (!iface->master), which
+		 * is exactly relay_ping()'s case.
 		 */
-		int pktt = 1 << PACKET_MULTICAST;
+		int pktt = (1 << PACKET_MULTICAST) | (1 << PACKET_OUTGOING);
 		if (setsockopt(iface->ndp_event.uloop.fd, SOL_PACKET, PACKET_RECV_TYPE,
 				&pktt, sizeof(pktt)) < 0) {
 			error("setsockopt(PACKET_RECV_TYPE): %m");
@@ -259,7 +318,7 @@ int ndp_setup_interface(struct interface *iface, bool enable)
 		memset(&ll, 0, sizeof(ll));
 		ll.sll_family = AF_PACKET;
 		ll.sll_ifindex = iface->ifindex;
-		ll.sll_protocol = htons(ETH_P_IPV6);
+		ll.sll_protocol = htons(ETH_P_ALL);
 
 		if (bind(iface->ndp_event.uloop.fd, (struct sockaddr *)&ll, sizeof(ll)) < 0) {
 			error("bind(): %m");
