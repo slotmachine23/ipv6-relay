@@ -102,6 +102,39 @@ make CROSS_COMPILE=aarch64-linux-gnu- SYSROOT=/usr/aarch64-linux-gnu/sys-root
 
 > 这里用 CentOS Stream 而不是 RHEL 自身仓库，是因为普通 RHEL 订阅一般只授权本机架构（x86_64），没有 aarch64 版本的仓库可用；CentOS Stream 是 RHEL 的上游，二进制兼容性很好，只用来取头文件和库，不影响最终产物（产物本身是给 aarch64 目标机器用的，不会装回本机）。
 
+## 运行时依赖
+
+如果只是拿到编译好的 `ipv6-relay` 二进制去部署（不在目标机上编译），只需要安装运行库（不含 `-dev` 头文件包），无需安装编译工具链：
+
+**Debian / Ubuntu / Armbian：**
+```bash
+sudo apt-get install libnl-3-200 libnl-route-3-200 libjson-c5
+```
+> `libjson-c` 的包名在不同发行版版本上会变（`libjson-c3`/`libjson-c4`/`libjson-c5`），可用 `apt-cache search libjson-c` 确认当前系统实际提供的版本。
+
+**Fedora / RHEL / CentOS：**
+```bash
+sudo dnf install libnl3 json-c
+```
+
+**Arch Linux：**
+```bash
+sudo pacman -S libnl json-c
+```
+
+**Alpine Linux：**
+```bash
+sudo apk add libnl3 json-c
+```
+
+部署后建议用 `ldd` 确认依赖是否齐全：
+
+```bash
+ldd /usr/sbin/ipv6-relay
+```
+
+如果出现 `not found`，说明目标机缺少对应库或版本不匹配，需要安装/升级相应包，或者直接在目标机上按上面的「编译」章节本地编译（尤其是路由器等和编译机架构不同的场景，交叉编译产物在目标机上不一定能直接运行，本地编译最省心）。
+
 ## 使用
 
 ### 1. 准备配置文件
