@@ -4,16 +4,10 @@
   },
   "interfaces": {
     "lan": {
-      "ifname": "eth1",
-      "ra": "relay",
-      "dhcpv6": "relay",
-      "ndp": "relay"
+      "ifname": "eth1"
     },
     "wan": {
       "ifname": "eth0",
-      "ra": "relay",
-      "dhcpv6": "relay",
-      "ndp": "relay",
       "master": true
     }
   }

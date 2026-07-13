@@ -21,10 +21,13 @@
 
 static void set_interface_defaults(struct interface *iface)
 {
-	iface->ignore = true;
-	iface->ra = MODE_DISABLED;
-	iface->dhcpv6 = MODE_DISABLED;
-	iface->ndp = MODE_DISABLED;
+	/* This daemon only ever does relaying, so every interface listed in
+	 * the config is fully relayed (RA + DHCPv6 + NDP) by default - there
+	 * is no per-service "disabled" mode to configure anymore. */
+	iface->ignore = false;
+	iface->ra = MODE_RELAY;
+	iface->dhcpv6 = MODE_RELAY;
+	iface->ndp = MODE_RELAY;
 	iface->learn_routes = 1;
 	iface->ndp_from_link_local = true;
 	iface->cached_linklocal_valid = false;
@@ -51,16 +54,6 @@ static void close_interface(struct interface *iface)
 	free(iface->addr6);
 	free(iface->ifname);
 	free(iface);
-}
-
-static int parse_mode(const char *mode)
-{
-	if (!strcmp(mode, "disabled"))
-		return MODE_DISABLED;
-	else if (!strcmp(mode, "relay"))
-		return MODE_RELAY;
-	else
-		return -1;
 }
 
 int config_parse_interface_json(const char *name, struct json_object *obj)
@@ -132,41 +125,10 @@ int config_parse_interface_json(const char *name, struct json_object *obj)
 
 	iface->inuse = true;
 
-	if (json_object_object_get_ex(obj, "ra", &tmp)) {
-		int mode = parse_mode(json_object_get_string(tmp));
-		if (mode >= 0) {
-			iface->ra = mode;
-			if (iface->ra != MODE_DISABLED)
-				iface->ignore = false;
-		} else {
-			error("Invalid ra mode '%s' for interface '%s'",
-			      json_object_get_string(tmp), iface->name);
-		}
-	}
-
-	if (json_object_object_get_ex(obj, "dhcpv6", &tmp)) {
-		int mode = parse_mode(json_object_get_string(tmp));
-		if (mode >= 0) {
-			iface->dhcpv6 = mode;
-			if (iface->dhcpv6 != MODE_DISABLED)
-				iface->ignore = false;
-		} else {
-			error("Invalid dhcpv6 mode '%s' for interface '%s'",
-			      json_object_get_string(tmp), iface->name);
-		}
-	}
-
-	if (json_object_object_get_ex(obj, "ndp", &tmp)) {
-		int mode = parse_mode(json_object_get_string(tmp));
-		if (mode >= 0) {
-			iface->ndp = mode;
-			if (iface->ndp != MODE_DISABLED)
-				iface->ignore = false;
-		} else {
-			error("Invalid ndp mode '%s' for interface '%s'",
-			      json_object_get_string(tmp), iface->name);
-		}
-	}
+	/* ra/dhcpv6/ndp are no longer configurable per interface: this daemon
+	 * only ever relays, so every interface listed here gets all three
+	 * services enabled (see set_interface_defaults()). Only "master"
+	 * (which side is the WAN/upstream) is still meaningful to set. */
 
 	if (json_object_object_get_ex(obj, "master", &tmp))
 		iface->master = json_object_get_boolean(tmp);
