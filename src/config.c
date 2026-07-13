@@ -274,9 +274,36 @@ void odhcpd_reload(void)
 	}
 
 	avl_for_each_element_safe(&interfaces, i, avl, tmp) {
-		if (i->inuse && i->ifflags & IFF_RUNNING) {
+		/*
+		 * Only drop an interface here if it is no longer present in
+		 * the (re)loaded config at all. An interface that is still
+		 * configured but simply not IFF_RUNNING yet - e.g. at daemon
+		 * startup, before the link has finished autonegotiating or
+		 * before systemd-networkd/dhcp has brought it up, which on a
+		 * fresh boot commonly races with this very reload - must stay
+		 * registered so the RTM_NEWLINK handler in netlink.c can find
+		 * and (re)enable it once it actually comes up.
+		 *
+		 * Previously this branch called close_interface() (avl_delete
+		 * + free) for any not-yet-running interface, permanently
+		 * forgetting it: handle_rtm_link() only ever updates an
+		 * *existing* entry in the interfaces tree matched by ifname,
+		 * so once the object was deleted a later carrier-up event had
+		 * nothing to attach to and the interface was never revived -
+		 * requiring a manual service restart to recover. This is what
+		 * made the relay come up broken after every router reboot
+		 * whenever "wan"/"lan" wasn't already running by the time
+		 * ipv6-relay started (network.target does not wait for that).
+		 *
+		 * reload_services() already does the right thing regardless
+		 * of link state: it enables the relay sockets when running
+		 * and cleanly tears them down (fd == -1, sysctls off) when
+		 * not, so calling it unconditionally here for every in-use
+		 * interface is safe.
+		 */
+		if (i->inuse)
 			reload_services(i);
-		} else
+		else
 			close_interface(i);
 	}
 }

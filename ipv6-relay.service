@@ -1,7 +1,15 @@
 [Unit]
 Description=IPv6 Relay Daemon
-After=network.target
-Wants=network.target
+# network.target alone only orders us after other network units start, it
+# does NOT wait for interfaces to actually be configured/up - on a fresh
+# boot this daemon was routinely starting before "wan"/"lan" had carrier,
+# which used to permanently drop those interfaces from its internal state
+# (see the odhcpd_reload() fix). network-online.target plus an active wait
+# service (e.g. systemd-networkd-wait-online, NetworkManager-wait-online)
+# closes most of that race; the daemon itself is now also robust to
+# interfaces still coming up late.
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
