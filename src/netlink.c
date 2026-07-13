@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include <linux/netlink.h>
+#include <linux/if.h>
 #include <linux/if_addr.h>
 #include <linux/neighbour.h>
 #include <linux/rtnetlink.h>
@@ -214,18 +215,35 @@ static int handle_rtm_link(struct nlmsghdr *hdr)
 		if (strcmp(iface->ifname, ifname))
 			continue;
 
-		iface->ifflags = ifi->ifi_flags;
-
-		/*
-		 * Assume for link event of the same index, that link changed
-		 * and reload services to enable or disable them based on the
-		 * RUNNING state of the interface.
-		 */
 		if (iface->ifindex == ifi->ifi_index) {
-			reload_services(iface);
+			bool was_running = iface->ifflags & IFF_RUNNING;
+			bool now_running = ifi->ifi_flags & IFF_RUNNING;
+
+			iface->ifflags = ifi->ifi_flags;
+
+			/*
+			 * Only reload services when the RUNNING state actually
+			 * toggled (a real carrier up/down), not on every link
+			 * notification for this interface. Unrelated flag churn
+			 * - notably IFF_ALLMULTI/IFF_PROMISC, which
+			 * ndp_setup_interface() itself flips via
+			 * PACKET_ADD_MEMBERSHIP/AF_PACKET every time it
+			 * (re)opens the NDP capture socket - also generates a
+			 * RTM_NEWLINK. Reacting to that here by unconditionally
+			 * reloading would tear down and recreate the very socket
+			 * that just caused the flag change, toggling it again and
+			 * producing a self-sustaining reload loop: the NDP raw
+			 * socket (and the proxy_ndp state, and the neighbor table
+			 * dump) never gets a stable window to actually capture and
+			 * relay Neighbor Solicitations, breaking NDP relay/proxy
+			 * entirely.
+			 */
+			if (was_running != now_running)
+				reload_services(iface);
 			continue;
 		}
 
+		iface->ifflags = ifi->ifi_flags;
 		iface->ifindex = ifi->ifi_index;
 		event_info.iface = iface;
 		call_netevent_handler_list(NETEV_IFINDEX_CHANGE, &event_info);
