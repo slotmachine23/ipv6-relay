@@ -1,11 +1,6 @@
-# Build output directory
-build/
-
-# Object files (fallback if built outside build/)
-*.o
-
-# Binary
-ipv6-relay
+# Build output binary (root-level only, not the cmd/ipv6-relay source dir)
+/ipv6-relay
+/ipv6-relay-*
 
 # Editor/IDE
 .vscode/

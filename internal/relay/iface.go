@@ -1,0 +1,155 @@
+package relay
+
+import (
+	"fmt"
+	"net"
+	"net/netip"
+	"time"
+)
+
+// Mode mirrors enum odhcpd_mode from the C daemon. This daemon only ever
+// relays, so the only real states are "disabled" (interface currently torn
+// down, e.g. because its link is down or there is no peer to relay with)
+// and "relay".
+type Mode int
+
+const (
+	ModeDisabled Mode = iota
+	ModeRelay
+)
+
+// IPAddr mirrors struct odhcpd_ipaddr: one address assigned to an
+// interface, with its prefix length and (absolute, wall-clock) lifetimes.
+type IPAddr struct {
+	Addr        netip.Addr
+	PrefixLen   uint8
+	PreferredLT uint32 // absolute unix time, or 0 = infinite
+	ValidLT     uint32 // absolute unix time, or 0 = infinite
+}
+
+// Interface mirrors struct interface. All fields are only ever read or
+// written from the single Engine goroutine (see engine.go), so no locking
+// is required here.
+type Interface struct {
+	Name    string // config key, e.g. "wan"
+	Ifname  string // real netdev name, e.g. "eth0"
+	Ifindex int
+	Running bool // IFF_RUNNING (carrier up)
+	Master  bool
+
+	LearnRoutes      bool
+	NdpFromLinkLocal bool
+	Inuse            bool
+
+	Addr6 []IPAddr
+
+	cachedLL      netip.Addr
+	cachedLLValid bool
+	HaveLinkLocal bool
+
+	RA     Mode
+	DHCPv6 Mode
+	NDP    Mode
+
+	router *routerSock
+	dhcp   *dhcpSock
+	ndp    *ndpSock
+
+	raSent   int
+	rsTimer  *time.Timer
+	rsTimerN int // generation counter to invalidate stale timers after reload
+}
+
+// interfaces holds every configured interface keyed by its config name.
+// Only ever touched from the Engine goroutine.
+var interfaces = map[string]*Interface{}
+
+func ifaceByIndex(idx int) *Interface {
+	for _, i := range interfaces {
+		if i.Ifindex == idx {
+			return i
+		}
+	}
+	return nil
+}
+
+func ifaceByIfname(name string) *Interface {
+	for _, i := range interfaces {
+		if i.Ifname == name {
+			return i
+		}
+	}
+	return nil
+}
+
+// setInterfaceDefaults resets the per-reload-cycle service configuration of
+// an interface to what config_parse_interface_json's set_interface_defaults
+// established: this daemon relays everything by default.
+func setInterfaceDefaults(i *Interface) {
+	i.RA = ModeRelay
+	i.DHCPv6 = ModeRelay
+	i.NDP = ModeRelay
+	i.LearnRoutes = true
+	i.NdpFromLinkLocal = true
+	i.cachedLLValid = false
+}
+
+// getMAC returns the hardware (MAC) address of the interface.
+func getMAC(iface *Interface) (net.HardwareAddr, error) {
+	nif, err := net.InterfaceByName(iface.Ifname)
+	if err != nil {
+		return nil, err
+	}
+	if len(nif.HardwareAddr) < 6 {
+		return nil, fmt.Errorf("interface %s has no hardware address", iface.Ifname)
+	}
+	return nif.HardwareAddr, nil
+}
+
+// getLinkLocalAddr returns (and caches) the interface's link-local address,
+// used as relay source address for RFC 4861 compliant sends.
+func getLinkLocalAddr(iface *Interface) (netip.Addr, bool) {
+	if iface.cachedLLValid {
+		return iface.cachedLL, true
+	}
+
+	for _, a := range iface.Addr6 {
+		if a.Addr.Is6() && a.Addr.IsLinkLocalUnicast() {
+			iface.cachedLL = a.Addr
+			iface.cachedLLValid = true
+			return a.Addr, true
+		}
+	}
+
+	return netip.Addr{}, false
+}
+
+// relayLinkAddress picks the address odhcpd's relay_link_address() would
+// pick: prefer an address that is both valid and preferred; fall back to
+// whichever valid address has the longest remaining valid lifetime.
+func relayLinkAddress(iface *Interface) (netip.Addr, bool) {
+	now := uint32(nowMono())
+	var best *IPAddr
+
+	for idx := range iface.Addr6 {
+		a := &iface.Addr6[idx]
+
+		if a.ValidLT != 0 && a.ValidLT <= now {
+			continue // expired
+		}
+
+		if a.PreferredLT == 0 || a.PreferredLT > now {
+			best = a
+			break
+		}
+
+		if best == nil || (a.ValidLT == 0) || (best.ValidLT != 0 && a.ValidLT > best.ValidLT) {
+			best = a
+		}
+	}
+
+	if best == nil {
+		return netip.Addr{}, false
+	}
+	return best.Addr, true
+}
