@@ -29,7 +29,7 @@ sudo install -m 755 ipv6-relay /usr/sbin/ipv6-relay
 
 ## 交叉编译
 
-Go 自带交叉编译支持，不需要额外的交叉工具链或目标架构 sysroot。例如给 arm64 路由器编译：
+Go 自带交叉编译支持，例如给 arm64 路由器编译：
 
 ```bash
 GOOS=linux GOARCH=arm64 go build -o ipv6-relay-arm64 ./cmd/ipv6-relay
