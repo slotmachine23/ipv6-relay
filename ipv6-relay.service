@@ -22,7 +22,12 @@ ExecReload=/bin/kill -HUP $MAINPID
 # privileged DHCPv6 port (547) are granted via ambient capabilities instead
 # of root. /etc/ipv6-relay/config.json must remain world-readable (or
 # readable by this user/group) for this to work - see README.
-User=nobody
+#
+# DynamicUser allocates a fresh, exclusive system UID/GID for this unit at
+# startup (and reclaims it on stop) instead of running as the shared
+# "nobody" account, avoiding the cross-service UID collision risk systemd
+# warns about for "nobody".
+DynamicUser=yes
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
