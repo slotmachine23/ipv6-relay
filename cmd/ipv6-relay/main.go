@@ -40,6 +40,14 @@ func printUsage(app string, exitCode int) {
 }
 
 func main() {
+	// Running with no arguments at all is almost always a mistake (the
+	// user just double-checking how to invoke it), not an attempt to run
+	// with implicit defaults - show the usage text instead of a bare
+	// "no config file" error.
+	if len(os.Args) == 1 {
+		printUsage(os.Args[0], 1)
+	}
+
 	configFile := flag.String("c", "", "JSON configuration file")
 	logLevel := flag.Int("l", relay.LogWarning, "log level 0..7")
 	foreground := flag.Bool("f", false, "log to stderr instead of syslog")
