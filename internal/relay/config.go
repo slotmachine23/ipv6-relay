@@ -65,9 +65,26 @@ func fetchAddr6(ifindex int) []IPAddr {
 			PrefixLen:   uint8(ones),
 			PreferredLT: pref,
 			ValidLT:     valid,
+			Tentative:   a.Flags&unix.IFA_F_TENTATIVE != 0,
 		})
 	}
 	return out
+}
+
+func refreshInterfaceAddresses(iface *Interface) {
+	iface.Addr6 = fetchAddr6(iface.Ifindex)
+	updateLinkLocalState(iface)
+}
+
+func updateLinkLocalState(iface *Interface) {
+	iface.cachedLLValid = false
+	iface.HaveLinkLocal = false
+	for _, addr := range iface.Addr6 {
+		if addr.Addr.IsLinkLocalUnicast() {
+			iface.HaveLinkLocal = true
+			break
+		}
+	}
 }
 
 // lifetimeAbs converts a netlink lft (seconds remaining, or
@@ -100,33 +117,28 @@ func findOrCreateInterface(name string) *Interface {
 // parseInterfaceJSON mirrors config_parse_interface_json().
 func parseInterfaceJSON(name string, obj jsonIface) error {
 	iface := findOrCreateInterface(name)
-	isNew := iface.Ifindex == 0 && iface.Ifname == ""
 
 	if iface.Ifname == "" && obj.Ifname == nil {
 		return fmt.Errorf("interface %q has no ifname configured", name)
 	}
 
 	if obj.Ifname != nil {
-		iface.Ifname = *obj.Ifname
-
-		link, err := netlink.LinkByName(iface.Ifname)
+		newIfname := *obj.Ifname
+		link, err := netlink.LinkByName(newIfname)
 		if err != nil {
-			return fmt.Errorf("interface %q (%s): %w", name, iface.Ifname, err)
+			return fmt.Errorf("interface %q (%s): %w", name, newIfname, err)
 		}
+
+		if iface.Ifindex != 0 &&
+			(iface.Ifname != newIfname || iface.Ifindex != link.Attrs().Index) {
+			disableServices(iface)
+			clearMirroredState(iface)
+		}
+
+		iface.Ifname = newIfname
 		iface.Ifindex = link.Attrs().Index
 		iface.Running = link.Attrs().RawFlags&unix.IFF_RUNNING != 0
-	}
-
-	if isNew {
-		iface.Addr6 = fetchAddr6(iface.Ifindex)
-	}
-
-	iface.HaveLinkLocal = false
-	for _, a := range iface.Addr6 {
-		if a.Addr.IsLinkLocalUnicast() {
-			iface.HaveLinkLocal = true
-			break
-		}
+		refreshInterfaceAddresses(iface)
 	}
 
 	iface.Inuse = true
@@ -199,6 +211,12 @@ func reloadServices(i *Interface) {
 		_ = dhcpv6Setup(i, false)
 		_ = ndpSetup(i, false)
 	}
+}
+
+func disableServices(i *Interface) {
+	_ = routerSetup(i, false)
+	_ = dhcpv6Setup(i, false)
+	_ = ndpSetup(i, false)
 }
 
 // Reload mirrors odhcpd_reload(): re-read the config file from scratch and

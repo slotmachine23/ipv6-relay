@@ -25,6 +25,7 @@ type IPAddr struct {
 	PrefixLen   uint8
 	PreferredLT uint32 // absolute unix time, or 0 = infinite
 	ValidLT     uint32 // absolute unix time, or 0 = infinite
+	Tentative   bool
 }
 
 // Interface mirrors struct interface. All fields are only ever read or
@@ -114,7 +115,7 @@ func getLinkLocalAddr(iface *Interface) (netip.Addr, bool) {
 	}
 
 	for _, a := range iface.Addr6 {
-		if a.Addr.Is6() && a.Addr.IsLinkLocalUnicast() {
+		if !a.Tentative && a.Addr.Is6() && a.Addr.IsLinkLocalUnicast() {
 			iface.cachedLL = a.Addr
 			iface.cachedLLValid = true
 			return a.Addr, true
@@ -134,7 +135,7 @@ func relayLinkAddress(iface *Interface) (netip.Addr, bool) {
 	for idx := range iface.Addr6 {
 		a := &iface.Addr6[idx]
 
-		if a.ValidLT != 0 && a.ValidLT <= now {
+		if a.Tentative || (a.ValidLT != 0 && a.ValidLT <= now) {
 			continue // expired
 		}
 

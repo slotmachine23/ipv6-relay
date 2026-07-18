@@ -130,7 +130,22 @@ func solicitTimerFire(iface *Interface, gen int) {
 		return
 	}
 
-	sendRouterSolicitation(iface)
+	// A link-up event can precede IPv6 link-local address assignment. Sending
+	// before the address exists fails with EADDRNOTAVAIL; wait without
+	// consuming one of the three actual solicitation attempts.
+	if _, ok := getLinkLocalAddr(iface); !ok {
+		iface.rsTimer = time.AfterFunc(rtrSolicitationInterval, func() {
+			Eng.Post(func() { solicitTimerFire(iface, gen) })
+		})
+		return
+	}
+
+	if !sendRouterSolicitation(iface) {
+		iface.rsTimer = time.AfterFunc(rtrSolicitationInterval, func() {
+			Eng.Post(func() { solicitTimerFire(iface, gen) })
+		})
+		return
+	}
 
 	iface.raSent++
 	if iface.raSent < maxRtrSolicitations {
@@ -143,9 +158,9 @@ func solicitTimerFire(iface *Interface, gen int) {
 // sendRouterSolicitation mirrors send_router_solicitation(): send an RS to
 // the all-routers multicast address, including a Source Link-Layer Address
 // option per RFC 4861 4.1 whenever we know our own MAC.
-func sendRouterSolicitation(iface *Interface) {
+func sendRouterSolicitation(iface *Interface) bool {
 	if iface.router == nil {
-		return
+		return false
 	}
 
 	pkt := make([]byte, 8)
@@ -160,7 +175,7 @@ func sendRouterSolicitation(iface *Interface) {
 		pkt = append(pkt, opt...)
 	}
 
-	sendICMP6(iface, allIPv6Routers, iface.Ifindex, netip.Addr{}, pkt)
+	return sendICMP6(iface, allIPv6Routers, iface.Ifindex, netip.Addr{}, pkt) == nil
 }
 
 // forwardRouterSolicitation mirrors forward_router_solicitation(): resend
@@ -235,11 +250,11 @@ func forwardRouterAdvertisement(iface *Interface, data []byte) {
 // forward_router_advertisement() in the C daemon use this plain variant;
 // only ndp.c's relay_ping() needs the link-local-source variant (see
 // sendICMP6FD in rawsock.go).
-func sendICMP6(iface *Interface, dest netip.Addr, ifindex int, _ netip.Addr, payload []byte) {
+func sendICMP6(iface *Interface, dest netip.Addr, ifindex int, _ netip.Addr, payload []byte) error {
 	if iface.router == nil {
-		return
+		return unix.EBADF
 	}
-	sendICMP6FD(iface.router.fd, iface, dest, ifindex, netip.Addr{}, payload)
+	return sendICMP6FD(iface.router.fd, iface, dest, ifindex, netip.Addr{}, payload)
 }
 
 // routerReadLoop reads ICMPv6 packets from a router socket and posts them
@@ -280,14 +295,15 @@ func routerReadLoop(rs *routerSock) {
 		data := make([]byte, n)
 		copy(data, buf[:n])
 
-		Eng.Post(func() { handleICMPv6(rs.iface, data) })
+		Eng.Post(func() { handleICMPv6(rs, data) })
 	}
 }
 
 // handleICMPv6 mirrors handle_icmpv6(): validate and relay RS/RA between
 // interfaces.
-func handleICMPv6(iface *Interface, data []byte) {
-	if iface.router == nil || iface.RA != ModeRelay {
+func handleICMPv6(rs *routerSock, data []byte) {
+	iface := rs.iface
+	if iface.router != rs || iface.RA != ModeRelay {
 		return
 	}
 	if len(data) < 4 {

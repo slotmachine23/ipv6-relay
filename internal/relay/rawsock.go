@@ -115,15 +115,17 @@ func joinMulticast6(fd int, group netip.Addr, ifindex int, join bool) error {
 // compliant source, used by ndp.c's relay_ping() via
 // odhcpd_try_send_with_src()); otherwise the kernel picks the source
 // (plain odhcpd_send()).
-func sendICMP6FD(fd int, iface *Interface, dest netip.Addr, ifindex int, tryLinkLocalSrc netip.Addr, payload []byte) {
+func sendICMP6FD(fd int, iface *Interface, dest netip.Addr, ifindex int, tryLinkLocalSrc netip.Addr, payload []byte) error {
 	sa := sockaddrIn6(dest, unix.IPPROTO_ICMPV6, ifindex)
 	oob := cmsgPktinfo(ifindex, tryLinkLocalSrc)
 
 	if err := unix.Sendmsg(fd, payload, oob, sa, 0); err != nil {
 		Errorf("Failed to send ICMPv6 to %s%%%s@%s: %v", dest, iface.Name, iface.Ifname, err)
+		return err
 	} else {
 		Debugf("Sent %d bytes ICMPv6 to %s%%%s@%s", len(payload), dest, iface.Name, iface.Ifname)
 	}
+	return nil
 }
 
 // sendICMP6WithLLSrc mirrors odhcpd_try_send_with_src(): prefer the
@@ -136,7 +138,7 @@ func sendICMP6WithLLSrc(fd int, iface *Interface, dest netip.Addr, ifindex int, 
 			src = ll
 		}
 	}
-	sendICMP6FD(fd, iface, dest, ifindex, src, payload)
+	_ = sendICMP6FD(fd, iface, dest, ifindex, src, payload)
 }
 
 func mustParseAddr(s string) netip.Addr {

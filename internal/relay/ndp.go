@@ -55,19 +55,19 @@ func attachFilter(fd int, prog []unix.SockFilter) error {
 func ndpSetup(iface *Interface, enable bool) error {
 	enable = enable && iface.NDP != ModeDisabled
 
-	procPath := "/proc/sys/net/ipv6/conf/" + iface.Ifname + "/proxy_ndp"
-	procFile, err := os.OpenFile(procPath, os.O_WRONLY, 0)
-	if err != nil {
-		return err
-	}
-	defer procFile.Close()
-
 	if iface.ndp != nil {
 		close(iface.ndp.done)
 		closeFD(iface.ndp.fd)
 		closeFD(iface.ndp.pingFd)
 		iface.ndp = nil
 	}
+
+	procPath := "/proc/sys/net/ipv6/conf/" + iface.Ifname + "/proxy_ndp"
+	procFile, err := os.OpenFile(procPath, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer procFile.Close()
 
 	if !enable {
 		_, err := procFile.WriteString("0\n")
@@ -216,8 +216,7 @@ func ndpReadLoop(ns *ndpSock) {
 		var srcMAC [6]byte
 		copy(srcMAC[:], sll.Addr[:6])
 
-		iface := ns.iface
-		Eng.Post(func() { handleSolicit(iface, srcMAC, data) })
+		Eng.Post(func() { handleSolicit(ns, srcMAC, data) })
 	}
 }
 
@@ -226,8 +225,9 @@ func ndpReadLoop(ns *ndpSock) {
 // non-master interface, actively resolve the target on every other relay
 // interface (relay_ping) so whichever one the target actually sits behind
 // learns it and triggers the proxy/host-route mirror.
-func handleSolicit(iface *Interface, srcMAC [6]byte, data []byte) {
-	if iface.ndp == nil || iface.NDP != ModeRelay {
+func handleSolicit(ns *ndpSock, srcMAC [6]byte, data []byte) {
+	iface := ns.iface
+	if iface.ndp != ns || iface.NDP != ModeRelay {
 		return
 	}
 

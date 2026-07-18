@@ -80,6 +80,21 @@ func handleLinkEvent(u netlink.LinkUpdate) {
 		return
 	}
 
+	if u.Header.Type == unix.RTM_DELLINK {
+		if iface.Ifindex != int(u.Index) {
+			return
+		}
+
+		disableServices(iface)
+		clearMirroredState(iface)
+		iface.Ifindex = 0
+		iface.Running = false
+		iface.Addr6 = nil
+		iface.cachedLLValid = false
+		iface.HaveLinkLocal = false
+		return
+	}
+
 	nowRunning := u.IfInfomsg.Flags&unix.IFF_RUNNING != 0
 
 	if iface.Ifindex == int(u.Index) {
@@ -87,16 +102,23 @@ func handleLinkEvent(u netlink.LinkUpdate) {
 		iface.Running = nowRunning
 
 		if wasRunning != nowRunning {
+			if nowRunning {
+				refreshInterfaceAddresses(iface)
+			}
 			reloadServices(iface)
 		}
 		return
 	}
 
-	// ifindex changed (e.g. interface was recreated) - just adopt it, the
-	// C daemon fires NETEV_IFINDEX_CHANGE here but nothing outside
-	// netlink.c actually consumes that event.
+	// A same-name interface can come back with a new ifindex. Sockets,
+	// multicast memberships, routes, and mirrored-neighbor bookkeeping all
+	// refer to the old index and must be replaced as one lifecycle change.
+	disableServices(iface)
+	clearMirroredState(iface)
 	iface.Ifindex = int(u.Index)
 	iface.Running = nowRunning
+	refreshInterfaceAddresses(iface)
+	reloadServices(iface)
 }
 
 // handleAddrEvent mirrors handle_rtm_addr()'s effects: refresh the cached
@@ -112,7 +134,7 @@ func handleAddrEvent(u netlink.AddrUpdate) {
 		return
 	}
 
-	iface.Addr6 = fetchAddr6(iface.Ifindex)
+	refreshInterfaceAddresses(iface)
 
 	addr, ok := netip.AddrFromSlice(u.LinkAddress.IP.To16())
 	if !ok {
@@ -126,8 +148,27 @@ func handleAddrEvent(u netlink.AddrUpdate) {
 	}
 
 	if addr.IsLinkLocalUnicast() {
+		// refreshInterfaceAddresses derives this from the complete current
+		// list, so removing one of multiple link-local addresses stays correct.
 		iface.cachedLLValid = false
-		iface.HaveLinkLocal = u.NewAddr
+	}
+}
+
+func clearMirroredState(iface *Interface) {
+	for _, cached := range iface.Addr6 {
+		addr := cached.Addr
+		if iface.NDP == ModeRelay && !addr.IsLoopback() && !addr.IsMulticast() &&
+			(!addr.IsLinkLocalUnicast() || iface.LearnRoutes) {
+			ndpMirrorAddr(addr, iface, false)
+		}
+	}
+
+	for key := range mirroredNeighs {
+		if key.ifindex != iface.Ifindex {
+			continue
+		}
+		ndpMirrorAddr(key.addr, iface, false)
+		delete(mirroredNeighs, key)
 	}
 }
 
@@ -250,7 +291,11 @@ func setupProxyNeigh(addr netip.Addr, ifindex int, add bool) error {
 	if add {
 		return netlink.NeighSet(n)
 	}
-	return netlink.NeighDel(n)
+	if err := netlink.NeighDel(n); err != nil &&
+		!errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
 }
 
 // seedMirroredNeighbors mirrors netlink_dump_neigh_table(true) + the

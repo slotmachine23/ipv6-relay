@@ -151,14 +151,14 @@ func dhcpReadLoop(ds *dhcpSock) {
 		data := make([]byte, n)
 		copy(data, buf[:n])
 
-		iface := ds.iface
-		Eng.Post(func() { handleDHCPv6(iface, src, data) })
+		Eng.Post(func() { handleDHCPv6(ds, src, data) })
 	}
 }
 
 // handleDHCPv6 mirrors handle_dhcpv6().
-func handleDHCPv6(iface *Interface, src netip.Addr, data []byte) {
-	if iface.dhcp == nil || iface.DHCPv6 != ModeRelay {
+func handleDHCPv6(ds *dhcpSock, src netip.Addr, data []byte) {
+	iface := ds.iface
+	if iface.dhcp != ds || iface.DHCPv6 != ModeRelay {
 		return
 	}
 
