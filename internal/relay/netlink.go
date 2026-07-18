@@ -1,8 +1,10 @@
 package relay
 
 import (
+	"errors"
 	"net"
 	"net/netip"
+	"syscall"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -225,7 +227,15 @@ func setupRoute(addr netip.Addr, prefixlen int, ifindex int, gw *netip.Addr, met
 		return netlink.RouteReplace(route)
 	}
 
-	return netlink.RouteDel(route)
+	// ESRCH ("no such process") from RouteDel just means the route is
+	// already gone (e.g. the kernel/network stack flushed it itself when
+	// the delegated prefix changed and the address was removed). The
+	// desired end state - no route - already holds, so this isn't a real
+	// error and shouldn't be logged as one.
+	if err := netlink.RouteDel(route); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
 }
 
 // setupProxyNeigh mirrors netlink_setup_proxy_neigh().
