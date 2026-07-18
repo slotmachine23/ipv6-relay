@@ -43,6 +43,18 @@ func attachFilter(fd int, prog []unix.SockFilter) error {
 	return unix.SetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &fprog)
 }
 
+// setProxyNDP toggles net.ipv6.conf.<ifname>.proxy_ndp. Without proxy_ndp=1
+// the kernel silently ignores every NTF_PROXY neighbor entry we install, so
+// this must stay enabled for the whole lifetime of the relay - see
+// reconcileKernelState() for why it is periodically re-asserted.
+func setProxyNDP(ifname string, enable bool) error {
+	val := []byte("0\n")
+	if enable {
+		val = []byte("1\n")
+	}
+	return os.WriteFile("/proc/sys/net/ipv6/conf/"+ifname+"/proxy_ndp", val, 0)
+}
+
 // ndpSetup mirrors ndp_setup_interface(): toggle the proxy_ndp sysctl and
 // (de)configure the AF_PACKET capture socket + ping socket used to relay
 // Neighbor Solicitations and actively resolve targets on other interfaces.
@@ -62,16 +74,8 @@ func ndpSetup(iface *Interface, enable bool) error {
 		iface.ndp = nil
 	}
 
-	procPath := "/proc/sys/net/ipv6/conf/" + iface.Ifname + "/proxy_ndp"
-	procFile, err := os.OpenFile(procPath, os.O_WRONLY, 0)
-	if err != nil {
-		return err
-	}
-	defer procFile.Close()
-
 	if !enable {
-		_, err := procFile.WriteString("0\n")
-		return err
+		return setProxyNDP(iface.Ifname, false)
 	}
 
 	pingFd, err := unix.Socket(unix.AF_INET6, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.IPPROTO_ICMPV6)
@@ -120,7 +124,7 @@ func ndpSetup(iface *Interface, enable bool) error {
 		}
 	}()
 
-	if _, err := procFile.WriteString("1\n"); err != nil {
+	if err := setProxyNDP(iface.Ifname, true); err != nil {
 		return err
 	}
 

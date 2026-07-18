@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"syscall"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -67,6 +68,77 @@ func StartNetlinkMonitor(done <-chan struct{}) error {
 	}()
 
 	return nil
+}
+
+// reconcileInterval bounds how long externally-clobbered relay state can stay
+// broken. An external network manager - notably systemd-networkd driven by
+// `netplan apply` - resets net.ipv6.conf.<if>.proxy_ndp back to 0 and, with
+// its default ManageForeignRoutes=yes, flushes the /128 host routes we install
+// for downstream hosts. Neither action produces a link/address/neighbor
+// netlink event we react to, and our mirroredNeighs cache still believes
+// everything is present, so without this periodic re-assertion downstream IPv6
+// stays blackholed until the daemon is restarted or reloaded.
+const reconcileInterval = 10 * time.Second
+
+// StartReconciler periodically re-asserts all kernel-side relay state so that
+// the daemon self-heals after an external actor clobbers proxy_ndp / host
+// routes (see reconcileInterval).
+func StartReconciler(done <-chan struct{}) {
+	go func() {
+		t := time.NewTicker(reconcileInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				Eng.Post(reconcileKernelState)
+			}
+		}
+	}()
+}
+
+// reconcileKernelState re-applies the proxy_ndp sysctl, proxy-NDP neighbor
+// entries and host routes the daemon is responsible for. Every underlying
+// operation (sysctl write, NeighSet, RouteReplace) is idempotent, so on the
+// steady-state happy path this is a cheap no-op; it only actually changes
+// anything when something external removed our state. Runs on the Engine
+// goroutine.
+func reconcileKernelState() {
+	for _, iface := range interfaces {
+		if iface.NDP != ModeRelay || iface.ndp == nil {
+			continue
+		}
+		if err := setProxyNDP(iface.Ifname, true); err != nil {
+			Debugf("reconcile proxy_ndp on %s: %v", iface.Ifname, err)
+		}
+	}
+
+	// Re-assert the mirror for every interface's own downstream addresses.
+	for _, iface := range interfaces {
+		if iface.NDP != ModeRelay {
+			continue
+		}
+		for _, a := range iface.Addr6 {
+			addr := a.Addr
+			if addr.IsLoopback() || addr.IsMulticast() {
+				continue
+			}
+			if addr.IsLinkLocalUnicast() && !iface.LearnRoutes {
+				continue
+			}
+			ndpMirrorAddr(addr, iface, true)
+		}
+	}
+
+	// Re-assert the mirror for every downstream host we have learned.
+	for key := range mirroredNeighs {
+		iface := ifaceByIndex(key.ifindex)
+		if iface == nil {
+			continue
+		}
+		ndpMirrorAddr(key.addr, iface, true)
+	}
 }
 
 // handleLinkEvent mirrors handle_rtm_link(): react to a real carrier

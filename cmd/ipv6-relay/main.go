@@ -109,6 +109,11 @@ func main() {
 		os.Exit(4)
 	}
 
+	// Periodically re-assert proxy_ndp / host routes so an external network
+	// manager (e.g. systemd-networkd on `netplan apply`) clobbering them does
+	// not permanently blackhole downstream IPv6.
+	relay.StartReconciler(done)
+
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
