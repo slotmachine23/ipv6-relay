@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"net/netip"
 	"os"
 	"time"
@@ -47,12 +48,22 @@ func attachFilter(fd int, prog []unix.SockFilter) error {
 // the kernel silently ignores every NTF_PROXY neighbor entry we install, so
 // this must stay enabled for the whole lifetime of the relay - see
 // reconcileKernelState() for why it is periodically re-asserted.
+//
+// The sysctl is read before writing so a re-assert that finds the value
+// already correct (the common case on a debounced reconcile) is a pure read
+// with no write - it never touches the value unless it actually differs.
 func setProxyNDP(ifname string, enable bool) error {
-	val := []byte("0\n")
+	path := "/proc/sys/net/ipv6/conf/" + ifname + "/proxy_ndp"
+	want := byte('0')
 	if enable {
-		val = []byte("1\n")
+		want = '1'
 	}
-	return os.WriteFile("/proc/sys/net/ipv6/conf/"+ifname+"/proxy_ndp", val, 0)
+	if cur, err := os.ReadFile(path); err == nil {
+		if c := bytes.TrimSpace(cur); len(c) == 1 && c[0] == want {
+			return nil
+		}
+	}
+	return os.WriteFile(path, []byte{want, '\n'}, 0)
 }
 
 // ndpSetup mirrors ndp_setup_interface(): toggle the proxy_ndp sysctl and
