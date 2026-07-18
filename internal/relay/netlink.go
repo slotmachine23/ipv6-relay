@@ -24,9 +24,12 @@ var mirroredNeighs = map[mirroredNeighKey]bool{}
 
 // StartNetlinkMonitor subscribes to link/address/neighbor changes and
 // forwards them to the Engine, mirroring netlink_init()'s RTNLGRP_LINK /
-// RTNLGRP_IPV6_IFADDR / RTNLGRP_NEIGH membership (route events are
-// deliberately not subscribed to: the C daemon receives them too but never
-// actually acts on NETEV_ROUTE6_ADD/DEL).
+// RTNLGRP_IPV6_IFADDR / RTNLGRP_NEIGH membership. It additionally subscribes
+// to route changes (which the C daemon receives but ignores): they are the
+// event that lets the daemon self-heal after an external network manager -
+// notably systemd-networkd driven by `netplan apply` - flushes the /128 host
+// routes we install and, in the same reconfigure pass, resets
+// net.ipv6.conf.<if>.proxy_ndp back to 0. See handleRouteEvent.
 func StartNetlinkMonitor(done <-chan struct{}) error {
 	linkCh := make(chan netlink.LinkUpdate, 64)
 	if err := netlink.LinkSubscribe(linkCh, done); err != nil {
@@ -40,6 +43,14 @@ func StartNetlinkMonitor(done <-chan struct{}) error {
 
 	neighCh := make(chan netlink.NeighUpdate, 64)
 	if err := netlink.NeighSubscribe(neighCh, done); err != nil {
+		return err
+	}
+
+	// A flush (e.g. ManageForeignRoutes on `netplan apply`) deletes every one
+	// of our host routes in a single burst, so give this channel plenty of
+	// slack to avoid dropping updates before the reader drains them.
+	routeCh := make(chan netlink.RouteUpdate, 256)
+	if err := netlink.RouteSubscribe(routeCh, done); err != nil {
 		return err
 	}
 
@@ -61,6 +72,11 @@ func StartNetlinkMonitor(done <-chan struct{}) error {
 					return
 				}
 				Eng.Post(func() { handleNeighEvent(u) })
+			case u, ok := <-routeCh:
+				if !ok {
+					return
+				}
+				Eng.Post(func() { handleRouteEvent(u) })
 			case <-done:
 				return
 			}
@@ -70,32 +86,55 @@ func StartNetlinkMonitor(done <-chan struct{}) error {
 	return nil
 }
 
-// reconcileInterval bounds how long externally-clobbered relay state can stay
-// broken. An external network manager - notably systemd-networkd driven by
-// `netplan apply` - resets net.ipv6.conf.<if>.proxy_ndp back to 0 and, with
-// its default ManageForeignRoutes=yes, flushes the /128 host routes we install
-// for downstream hosts. Neither action produces a link/address/neighbor
-// netlink event we react to, and our mirroredNeighs cache still believes
-// everything is present, so without this periodic re-assertion downstream IPv6
-// stays blackholed until the daemon is restarted or reloaded.
-const reconcileInterval = 10 * time.Second
+// ourRouteMetric is the priority the daemon installs its persistent downstream
+// /128 host routes with (see ndpMirrorAddr). relay_ping's throwaway route uses
+// a different metric, so filtering on this value keeps that churn from
+// triggering reconciliation.
+const ourRouteMetric = 1024
 
-// StartReconciler periodically re-asserts all kernel-side relay state so that
-// the daemon self-heals after an external actor clobbers proxy_ndp / host
-// routes (see reconcileInterval).
-func StartReconciler(done <-chan struct{}) {
-	go func() {
-		t := time.NewTicker(reconcileInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-t.C:
-				Eng.Post(reconcileKernelState)
-			}
-		}
-	}()
+// reconcileDebounce coalesces the burst of RTM_DELROUTE events an external
+// flush produces into a single re-assertion pass, and lets the flush finish
+// before we re-add so our routes stick instead of racing the deleter.
+const reconcileDebounce = 2 * time.Second
+
+// reconcileScheduled guards against stacking debounce timers. Only ever
+// touched from the Engine goroutine.
+var reconcileScheduled bool
+
+// handleRouteEvent watches for deletion of the host routes the daemon owns.
+// systemd-networkd (on `netplan apply`, with its default ManageForeignRoutes)
+// flushes them and, in the same pass, resets proxy_ndp to 0 - neither of which
+// produces a link/address/neighbor event and neither of which the
+// mirroredNeighs cache notices. The route deletion is the one observable
+// signal, so a single (debounced) reconcile off it restores proxy_ndp, the
+// proxy-NDP entries and the host routes together. Runs on the Engine goroutine.
+func handleRouteEvent(u netlink.RouteUpdate) {
+	if u.Type != unix.RTM_DELROUTE || u.Priority != ourRouteMetric || u.Dst == nil {
+		return
+	}
+	if ones, bits := u.Dst.Mask.Size(); bits != 128 || ones != 128 {
+		return // only our /128 host routes
+	}
+	if iface := ifaceByIndex(u.LinkIndex); iface == nil || iface.NDP != ModeRelay {
+		return
+	}
+	scheduleReconcile()
+}
+
+// scheduleReconcile arranges for exactly one reconcileKernelState() to run
+// reconcileDebounce from now, collapsing a flush's event burst into a single
+// pass. Runs on (and only touches state from) the Engine goroutine.
+func scheduleReconcile() {
+	if reconcileScheduled {
+		return
+	}
+	reconcileScheduled = true
+	time.AfterFunc(reconcileDebounce, func() {
+		Eng.Post(func() {
+			reconcileScheduled = false
+			reconcileKernelState()
+		})
+	})
 }
 
 // reconcileKernelState re-applies the proxy_ndp sysctl, proxy-NDP neighbor
@@ -303,6 +342,15 @@ func ndpMirrorAddr(addr netip.Addr, iface *Interface, add bool) {
 		if c.Ifindex == iface.Ifindex || !c.Master || c.NDP != ModeRelay {
 			continue
 		}
+		// A proxy-NDP entry is inert unless proxy_ndp is enabled on its
+		// interface, so re-assert it here: this keeps proxy_ndp correct even
+		// after an external reset (e.g. `netplan apply`) for which no host
+		// route existed to trigger handleRouteEvent.
+		if add {
+			if err := setProxyNDP(c.Ifname, true); err != nil {
+				Debugf("proxy_ndp on %s: %v", c.Ifname, err)
+			}
+		}
 		if err := setupProxyNeigh(addr, c.Ifindex, add); err != nil {
 			Warnf("proxy neigh %s on %s: %v", addr, c.Ifname, err)
 		}
@@ -312,7 +360,7 @@ func ndpMirrorAddr(addr netip.Addr, iface *Interface, add bool) {
 		return
 	}
 
-	if err := setupRoute(addr, 128, iface.Ifindex, nil, 1024, add); err != nil {
+	if err := setupRoute(addr, 128, iface.Ifindex, nil, ourRouteMetric, add); err != nil {
 		Warnf("route %s/128 via %s: %v", addr, iface.Ifname, err)
 	}
 }
