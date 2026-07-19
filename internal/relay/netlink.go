@@ -290,6 +290,15 @@ func clearMirroredState(iface *Interface) {
 // again. A plain deletion (idle STALE GC) intentionally leaves the mirror
 // in place, exactly as upstream does, so idle-but-present hosts are not
 // blackholed.
+//
+// A NUD_FAILED entry is also reaped from the kernel's neighbor cache
+// unconditionally, not just when it was mirrored. relay_ping's speculative
+// probes (see relayPing) create a real neighbor entry on every relay
+// interface other than the one the target actually lives behind; on those
+// "wrong" interfaces resolution can never succeed, so the entry just sits
+// there FAILED forever - the kernel does not otherwise age these out under
+// normal gc thresholds. Left alone, this is exactly what accumulates as a
+// growing pile of stale FAILED entries in `ip -6 neigh show`.
 func handleNeighEvent(u netlink.NeighUpdate) {
 	if u.Type != unix.RTM_NEWNEIGH {
 		return
@@ -327,9 +336,28 @@ func handleNeighEvent(u netlink.NeighUpdate) {
 	if resolved && !mirrored {
 		mirroredNeighs[key] = true
 		ndpMirrorAddr(addr, iface, true)
-	} else if failed && mirrored {
-		delete(mirroredNeighs, key)
-		ndpMirrorAddr(addr, iface, false)
+	} else if failed {
+		if mirrored {
+			delete(mirroredNeighs, key)
+			ndpMirrorAddr(addr, iface, false)
+		}
+		deleteFailedNeigh(addr, iface.Ifindex)
+	}
+}
+
+// deleteFailedNeigh removes a real (non-proxy) NUD_FAILED neighbor cache
+// entry so it doesn't linger indefinitely; see handleNeighEvent. ESRCH/ENOENT
+// just means it's already gone (e.g. raced with the kernel's own GC) and
+// isn't worth logging.
+func deleteFailedNeigh(addr netip.Addr, ifindex int) {
+	n := &netlink.Neigh{
+		LinkIndex: ifindex,
+		Family:    unix.AF_INET6,
+		IP:        net.IP(addr.AsSlice()),
+	}
+	if err := netlink.NeighDel(n); err != nil &&
+		!errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ESRCH) {
+		Debugf("delete failed neigh %s on ifindex %d: %v", addr, ifindex, err)
 	}
 }
 
