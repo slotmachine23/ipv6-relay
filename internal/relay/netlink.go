@@ -103,13 +103,19 @@ const ourRouteMetric = 1024
 // proxy-NDP entry whose neighbor-cache entry has since disappeared from the
 // kernel entirely (not just gone FAILED) - either left over from a previous
 // run of the daemon or from this one. It also actively probes any real
-// neighbor entry currently sitting in NUD_STALE (relayPing, same mechanism
-// handleSolicit uses) so a genuinely-dead host actually gets pushed through
-// the kernel's NUD state machine to NUD_FAILED - a host that's simply gone
+// neighbor entry currently sitting in NUD_STALE by asking the kernel to
+// re-verify it (probeNeighbor sets NUD_PROBE, which makes the kernel itself
+// send a real unicast Neighbor Solicitation per RFC 4861 7.3.1 and drive the
+// NUD state machine from the reply, or lack of one) so a genuinely-dead
+// host actually gets pushed to NUD_FAILED - a host that's simply gone
 // silent otherwise stays STALE indefinitely and would never reach the
-// FAILED reap below on its own. The probe result lands asynchronously, so a
-// host pushed to FAILED by this pass is picked up on the *next* sweep
-// (or immediately by handleNeighEvent, since that also watches for it).
+// FAILED reap below on its own. Deliberately NOT an ICMPv6 echo probe: NS is
+// mandatory Neighbor Discovery traffic a host cannot selectively firewall
+// off without breaking its own reachability to us, unlike echo requests
+// which many hosts/firewalls silently drop, which would misclassify a live-
+// but-ping-blocking host as dead. The probe result lands asynchronously, so
+// a host pushed to FAILED by this pass is picked up on the *next* sweep (or
+// immediately by handleNeighEvent, since that also watches for it).
 const mirrorSweepInterval = 300 * time.Second
 
 // startMirrorSweep arranges for sweepFailedAndOrphans to run every
@@ -201,7 +207,7 @@ func sweepIfaceFailedAndOrphans(iface *Interface) {
 			// above to ever catch. The probe's outcome lands
 			// asynchronously - a resulting FAILED transition is reaped on
 			// the next sweep (or sooner via handleNeighEvent).
-			relayPing(addr, iface)
+			probeNeighbor(addr, iface.Ifindex)
 		}
 	}
 
@@ -485,6 +491,25 @@ func handleNeighEvent(u netlink.NeighUpdate) {
 			ndpMirrorAddr(addr, iface, false)
 		}
 		deleteFailedNeigh(addr, iface.Ifindex)
+	}
+}
+
+// probeNeighbor asks the kernel to re-verify a real (non-proxy) neighbor-
+// cache entry by setting it to NUD_PROBE: the kernel itself then sends a
+// real unicast Neighbor Solicitation (RFC 4861 7.3.1) and drives the entry
+// to REACHABLE (NA reply) or FAILED (no reply after retries) accordingly -
+// see sweepIfaceFailedAndOrphans. ESRCH/ENOENT just means the entry is
+// already gone (raced with the kernel's own GC) and isn't worth logging.
+func probeNeighbor(addr netip.Addr, ifindex int) {
+	n := &netlink.Neigh{
+		LinkIndex: ifindex,
+		Family:    unix.AF_INET6,
+		State:     unix.NUD_PROBE,
+		IP:        net.IP(addr.AsSlice()),
+	}
+	if err := netlink.NeighSet(n); err != nil &&
+		!errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ESRCH) {
+		Debugf("probe neigh %s on ifindex %d: %v", addr, ifindex, err)
 	}
 }
 
