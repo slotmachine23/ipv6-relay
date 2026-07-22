@@ -22,6 +22,7 @@ var Cfg = Config{}
 type jsonGlobal struct {
 	LogLevel                         *int  `json:"log_level"`
 	NotifyPrefixDeprecation          *bool `json:"notify_prefix_deprecation"`
+	PrefixMismatchPacketThreshold    *int  `json:"prefix_mismatch_packet_threshold"`
 	PrefixDeprecationIntervalSeconds *int  `json:"prefix_deprecation_interval_seconds"`
 }
 
@@ -77,9 +78,6 @@ func fetchAddr6(ifindex int) []IPAddr {
 func refreshInterfaceAddresses(iface *Interface) {
 	iface.Addr6 = fetchAddr6(iface.Ifindex)
 	updateLinkLocalState(iface)
-	if iface.Master {
-		evaluateWANPrefixes(iface)
-	}
 }
 
 func updateLinkLocalState(iface *Interface) {
@@ -183,6 +181,10 @@ func loadConfigJSON(path string) {
 
 	if root.Global != nil && root.Global.NotifyPrefixDeprecation != nil {
 		prefixDeprecationEnabled = *root.Global.NotifyPrefixDeprecation
+	}
+	if root.Global != nil && root.Global.PrefixMismatchPacketThreshold != nil &&
+		*root.Global.PrefixMismatchPacketThreshold > 0 {
+		prefixMismatchThreshold = *root.Global.PrefixMismatchPacketThreshold
 	}
 	if root.Global != nil && root.Global.PrefixDeprecationIntervalSeconds != nil &&
 		*root.Global.PrefixDeprecationIntervalSeconds > 0 {

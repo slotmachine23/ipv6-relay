@@ -60,12 +60,16 @@ type Interface struct {
 	rsTimer  *time.Timer
 	rsTimerN int // generation counter to invalidate stale timers after reload
 
-	// knownWANPrefixes/wanPrefixSeeded back evaluateWANPrefixes (see
-	// prefixwatch.go): the set of ULA/GUA prefixes currently considered
-	// "live" on this master interface, based purely on its own current
-	// kernel address list (no RA/PIO packet parsing involved).
-	knownWANPrefixes map[netip.Prefix]bool
-	wanPrefixSeeded  bool
+	// currentWANPrefix/wanPrefixSeeded/mismatchCandidate/mismatchCount back
+	// trackWANPrefixSnooping (see prefixwatch.go): real-time snooping of
+	// the actual Router Advertisements received on this master interface
+	// determines which single ULA/GUA prefix is currently "live" - a
+	// candidate prefix only replaces it after prefixMismatchThreshold
+	// consecutive RAs carrying that different prefix have been seen.
+	currentWANPrefix  netip.Prefix
+	wanPrefixSeeded   bool
+	mismatchCandidate netip.Prefix
+	mismatchCount     int
 
 	// lastRA* caches the fixed header of the last real Router Advertisement
 	// relayed on this master interface, so a synthesized prefix-deprecation

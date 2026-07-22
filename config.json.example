@@ -2,6 +2,7 @@
   "global": {
     "log_level": 5,
     "notify_prefix_deprecation": true,
+    "prefix_mismatch_packet_threshold": 3,
     "prefix_deprecation_interval_seconds": 300
   },
   "interfaces": {

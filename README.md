@@ -76,17 +76,19 @@ sudo chmod 644 /etc/ipv6-relay/config.json
 |------|----------|------|
 | `log_level` | 可选，默认 4 | 日志级别 0-7（同 `-l` 命令行参数，配置文件优先级低于显式传入的 `-l`） |
 | `notify_prefix_deprecation` | 可选，默认 `true` | 是否在检测到 WAN 口前缀被更新的前缀取代时，向 LAN 侧仍在使用旧前缀地址的邻居发送 lifetime=0 的终结通告（见下方说明） |
-| `prefix_deprecation_interval_seconds` | 可选，默认 300 | 上面这个终结通告的重发间隔（秒），直到 LAN 侧不再有使用该前缀地址的邻居为止才停止 |
+| `prefix_mismatch_packet_threshold` | 可选，默认 3 | 实时 snoop WAN 口收到的真实 RA 报文时，连续多少个报文携带同一个、与当前记录不同的 ULA/公网前缀，才判定前缀确实已经更换（防止上游把多个仍然有效的前缀分散在不同 RA 里发送时被误判） |
+| `prefix_deprecation_interval_seconds` | 可选，默认 300 | 确认前缀被取代后，终结通告的重发间隔（秒），直到 LAN 侧不再有使用该前缀地址的邻居为止才停止 |
 
-本项目会持续观察每个 `master` 接口自己当前的 IPv6 地址列表（ULA `fc00::/7` 或公网可路由地址），
-不解析上游 RA 报文本身。如果同时存在多个仍然有效（`valid_lft` 未到期）的此类前缀，只有剩余
-`preferred_lft` 最长（或为 infinite）的那个被视为"当前"前缀，其余的视为已被取代（例如上游重新
-编号/更换了前缀，但没有正确发送 `valid_lft=0`/`preferred_lft=0` 的撤回通告）。刚启动或接口刚
-出现时，会先静默记录一次当前状态，不会触发通告，避免把重启前就已存在的合法前缀误判为"过时"。
-一旦确认某个前缀被取代，就会向所有下游（非 `master`）接口里仍有该前缀下地址的邻居，发送一份
-只带有该前缀 PIO（Valid/Preferred Lifetime 均为 0）的合成 RA，每隔
-`prefix_deprecation_interval_seconds` 重发一次，直到 LAN 侧的邻居表里再也找不到该前缀下的地址
-为止。
+本项目会对每个 `master` 接口实时 snoop 收到的真实 RA 报文，解析其中的 PIO（Prefix Information
+Option），只关心 ULA（`fc00::/7`）或公网可路由的前缀（不含 link-local、组播）。当连续
+`prefix_mismatch_packet_threshold` 个 RA 都携带同一个、与当前记录不同的前缀时，才判定 WAN
+前缀确实被替换了（例如上游重新编号/更换了前缀，但没有正确发送 `valid_lft=0`/`preferred_lft=0`
+的撤回通告）——单个 RA 里出现一次不同的前缀不会立即触发，避免把上游偶尔把多个仍然有效的前缀
+分散在不同 RA 里发送误判成前缀更换。接口刚启动收到的第一个真实 RA 只会静默记录当前前缀，不会
+触发通告，避免把重启前就已存在的合法前缀误判为"过时"。一旦确认某个前缀被取代，就会向所有下游
+（非 `master`）接口里仍有该前缀下地址的邻居，发送一份只带有该前缀 PIO（Valid/Preferred
+Lifetime 均为 0）的合成 RA，之后每隔 `prefix_deprecation_interval_seconds` 重发一次，直到 LAN
+侧的邻居表里再也找不到该前缀下的地址为止。
 
 本项目只做 relay，不支持其他模式，所以**只要接口出现在配置里，就会同时中继 DHCPv6 / RA / NDP 三种服务**，不需要（也无法）单独开关；不想中继某个接口，直接把它从配置里删掉即可。`master` 用来标记哪一侧是上游：至少要有一个接口设为 `"master": true`，其余不带 `master` 的接口视为下游（LAN 侧）。
 

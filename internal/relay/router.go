@@ -323,6 +323,7 @@ func handleICMPv6(rs *routerSock, data []byte) {
 	case ndRouterAdvert:
 		if iface.Master {
 			captureLastRAHeader(iface, data)
+			trackWANPrefixSnooping(iface, data)
 		}
 		forwardRouterAdvertisement(iface, data)
 	}
