@@ -68,7 +68,10 @@ type Interface struct {
 	// against the interface's own kernel address list (see prefixwatch.go's
 	// package doc comment for why). A previously-known prefix is only
 	// dropped as dead after prefixMismatchThreshold consecutive real RAs
-	// in which it's absent from that RA's PIOs.
+	// in which it's absent from that RA's PIOs. knownWANPrefixes is also
+	// read by checkForOrphanedLANNeighbors as the reference set for
+	// spotting a LAN neighbor stuck on a prefix this process never
+	// personally watched die (e.g. after a restart).
 	knownWANPrefixes map[netip.Prefix]bool
 	missCounts       map[netip.Prefix]int
 	wanPrefixSeeded  bool
