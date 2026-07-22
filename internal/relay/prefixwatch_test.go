@@ -184,28 +184,31 @@ func TestTrackWANPrefixSnoopingResetsMissCountOnMatch(t *testing.T) {
 	}
 }
 
-func TestTrackWANPrefixSnoopingWANAddressPreventsDrop(t *testing.T) {
+func TestTrackWANPrefixSnoopingDropsPrefixEvenIfKernelAddressLingers(t *testing.T) {
 	withCleanPrefixWatchState(t)
 
 	oldPrefix := netip.MustParsePrefix("2001:db8:1::/64")
 	newPrefix := netip.MustParsePrefix("2001:db8:2::/64")
 
 	wan := &Interface{Name: "wan", Ifname: "wan0", Master: true, Addr6: []IPAddr{
-		// The interface itself still has a real address under oldPrefix,
-		// even though upstream stops repeating it in the RA (e.g. spread
-		// across separate RAs) - it must never be treated as a mismatch.
+		// The interface's own kernel address list still shows an address
+		// under oldPrefix (typical of an upstream that never sent a
+		// proper RFC 4861 withdrawal - the address just lingers, counting
+		// down its old valid_lft) - this must NOT prevent detection, since
+		// that's exactly the scenario this feature exists to catch.
 		{Addr: mustParseAddr("2001:db8:1::1"), PrefixLen: 64},
 	}}
 	interfaces["wan"] = wan
 
 	trackWANPrefixSnooping(wan, buildTestRA(oldPrefix)) // seed
 
-	for i := 0; i < prefixMismatchThreshold+2; i++ {
+	for i := 0; i < prefixMismatchThreshold; i++ {
 		trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
 	}
 
-	if !wan.knownWANPrefixes[oldPrefix] {
-		t.Fatalf("prefix %s backed by a real WAN address must never be dropped, got %v", oldPrefix, wan.knownWANPrefixes)
+	if wan.knownWANPrefixes[oldPrefix] {
+		t.Fatalf("prefix %s should have been dropped after %d consecutive RAs missing it, regardless of the lingering kernel address, got %v",
+			oldPrefix, prefixMismatchThreshold, wan.knownWANPrefixes)
 	}
 }
 

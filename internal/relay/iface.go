@@ -62,14 +62,13 @@ type Interface struct {
 
 	// knownWANPrefixes/missCounts/wanPrefixSeeded back trackWANPrefixSnooping
 	// (see prefixwatch.go): real-time snooping of the actual Router
-	// Advertisements received on this master interface, cross-checked
-	// against the interface's own current kernel address list, determines
-	// which ULA/GUA prefixes are currently "live" - an RA can legitimately
-	// carry (or the interface can legitimately hold addresses under)
-	// several such prefixes at once. A previously-known prefix is only
+	// Advertisements received on this master interface determines which
+	// ULA/GUA prefixes are currently "live" - an RA can legitimately carry
+	// several such prefixes at once. Deliberately NOT cross-checked
+	// against the interface's own kernel address list (see prefixwatch.go's
+	// package doc comment for why). A previously-known prefix is only
 	// dropped as dead after prefixMismatchThreshold consecutive real RAs
-	// in which it's absent from *both* that RA's PIOs and the interface's
-	// own address list.
+	// in which it's absent from that RA's PIOs.
 	knownWANPrefixes map[netip.Prefix]bool
 	missCounts       map[netip.Prefix]int
 	wanPrefixSeeded  bool
