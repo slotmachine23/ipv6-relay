@@ -83,6 +83,8 @@ func StartNetlinkMonitor(done <-chan struct{}) error {
 		}
 	}()
 
+	startMirrorSweep(done)
+
 	return nil
 }
 
@@ -91,6 +93,130 @@ func StartNetlinkMonitor(done <-chan struct{}) error {
 // a different metric, so filtering on this value keeps that churn from
 // triggering reconciliation.
 const ourRouteMetric = 1024
+
+// mirrorSweepInterval is how often sweepFailedAndOrphans runs as a periodic
+// backstop, in addition to the event-driven cleanup in handleNeighEvent/
+// handleRouteEvent. It exists to catch two things a purely event-driven
+// mechanism can never notice: a real neighbor-cache entry that was already
+// sitting in NUD_FAILED before this process's netlink subscription began
+// (so no fresh event ever arrives for it), and an owned /128 host route/
+// proxy-NDP entry whose neighbor-cache entry has since disappeared from the
+// kernel entirely (not just gone FAILED) - either left over from a previous
+// run of the daemon or from this one.
+const mirrorSweepInterval = 300 * time.Second
+
+// startMirrorSweep arranges for sweepFailedAndOrphans to run every
+// mirrorSweepInterval until done is closed.
+func startMirrorSweep(done <-chan struct{}) {
+	var tick func()
+	tick = func() {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		Eng.Post(sweepFailedAndOrphans)
+		time.AfterFunc(mirrorSweepInterval, tick)
+	}
+	time.AfterFunc(mirrorSweepInterval, tick)
+}
+
+// sweepFailedAndOrphans is the periodic backstop counterpart to
+// handleNeighEvent/handleRouteEvent (see mirrorSweepInterval). It applies
+// uniformly to every configured relay interface, master/WAN and slave/LAN
+// alike - deliberately not restricted to any particular address type (GUA
+// vs ULA), since an upstream WAN can itself be addressed out of ULA space;
+// routes are already never created for loopback/multicast/link-local
+// destinations in the first place (see ndpMirrorAddr), so no extra
+// address-class filtering is needed here beyond that. Runs on the Engine
+// goroutine.
+func sweepFailedAndOrphans() {
+	for _, iface := range interfaces {
+		if iface.NDP != ModeRelay {
+			continue
+		}
+		sweepIfaceFailedAndOrphans(iface)
+	}
+}
+
+// sweepIfaceFailedAndOrphans lists iface's current real (non-proxy) IPv6
+// neighbor-cache entries and this daemon's own /128 host routes on iface,
+// then (a) reaps any real neighbor entry already sitting in NUD_FAILED and
+// (b) tears down (route + proxy-NDP mirror on every other master interface)
+// any owned /128 route whose destination no longer has a matching real
+// neighbor-cache entry at all - regardless of whether either was created by
+// this process instance or a previous run.
+func sweepIfaceFailedAndOrphans(iface *Interface) {
+	link, err := netlink.LinkByIndex(iface.Ifindex)
+	if err != nil {
+		return
+	}
+
+	neighs, err := netlink.NeighList(link.Attrs().Index, unix.AF_INET6)
+	if err != nil {
+		Debugf("sweep: list neighbors on %s: %v", iface.Ifname, err)
+		return
+	}
+
+	live := map[netip.Addr]bool{}
+
+	for _, n := range neighs {
+		if n.Flags&unix.NTF_PROXY != 0 {
+			continue // our own proxy-NDP entries, not real neighbors
+		}
+
+		addr, ok := netip.AddrFromSlice(n.IP.To16())
+		if !ok {
+			continue
+		}
+		addr = addr.Unmap()
+
+		if addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast() {
+			continue
+		}
+
+		if n.State&unix.NUD_FAILED != 0 {
+			key := mirroredNeighKey{addr: addr, ifindex: iface.Ifindex}
+			if mirroredNeighs[key] {
+				delete(mirroredNeighs, key)
+				ndpMirrorAddr(addr, iface, false)
+			}
+			deleteFailedNeigh(addr, iface.Ifindex)
+			continue
+		}
+
+		live[addr] = true
+	}
+
+	routes, err := netlink.RouteList(link, unix.AF_INET6)
+	if err != nil {
+		Debugf("sweep: list routes on %s: %v", iface.Ifname, err)
+		return
+	}
+
+	for _, r := range routes {
+		if r.LinkIndex != iface.Ifindex || r.Priority != ourRouteMetric || r.Dst == nil {
+			continue
+		}
+		if ones, bits := r.Dst.Mask.Size(); bits != 128 || ones != 128 {
+			continue
+		}
+
+		addr, ok := netip.AddrFromSlice(r.Dst.IP.To16())
+		if !ok {
+			continue
+		}
+		addr = addr.Unmap()
+
+		if live[addr] {
+			continue
+		}
+
+		delete(mirroredNeighs, mirroredNeighKey{addr: addr, ifindex: iface.Ifindex})
+		Noticef("Removing orphaned host route/proxy-NDP entry %s on %s (no matching neighbor left)", addr, iface.Ifname)
+		ndpMirrorAddr(addr, iface, false)
+	}
+}
 
 // reconcileDebounce coalesces the burst of RTM_DELROUTE events an external
 // flush produces into a single re-assertion pass, and lets the flush finish
