@@ -96,13 +96,20 @@ const ourRouteMetric = 1024
 
 // mirrorSweepInterval is how often sweepFailedAndOrphans runs as a periodic
 // backstop, in addition to the event-driven cleanup in handleNeighEvent/
-// handleRouteEvent. It exists to catch two things a purely event-driven
+// handleRouteEvent. It exists to catch things a purely event-driven
 // mechanism can never notice: a real neighbor-cache entry that was already
 // sitting in NUD_FAILED before this process's netlink subscription began
 // (so no fresh event ever arrives for it), and an owned /128 host route/
 // proxy-NDP entry whose neighbor-cache entry has since disappeared from the
 // kernel entirely (not just gone FAILED) - either left over from a previous
-// run of the daemon or from this one.
+// run of the daemon or from this one. It also actively probes any real
+// neighbor entry currently sitting in NUD_STALE (relayPing, same mechanism
+// handleSolicit uses) so a genuinely-dead host actually gets pushed through
+// the kernel's NUD state machine to NUD_FAILED - a host that's simply gone
+// silent otherwise stays STALE indefinitely and would never reach the
+// FAILED reap below on its own. The probe result lands asynchronously, so a
+// host pushed to FAILED by this pass is picked up on the *next* sweep
+// (or immediately by handleNeighEvent, since that also watches for it).
 const mirrorSweepInterval = 300 * time.Second
 
 // startMirrorSweep arranges for sweepFailedAndOrphans to run every
@@ -186,6 +193,16 @@ func sweepIfaceFailedAndOrphans(iface *Interface) {
 		}
 
 		live[addr] = true
+
+		if n.State&unix.NUD_STALE != 0 {
+			// Actively probe: a genuinely-dead host would otherwise sit in
+			// STALE forever (the kernel only re-confirms on next actual
+			// traffic), so it would never reach NUD_FAILED for the reap
+			// above to ever catch. The probe's outcome lands
+			// asynchronously - a resulting FAILED transition is reaped on
+			// the next sweep (or sooner via handleNeighEvent).
+			relayPing(addr, iface)
+		}
 	}
 
 	routes, err := netlink.RouteList(link, unix.AF_INET6)
