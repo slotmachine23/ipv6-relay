@@ -102,15 +102,15 @@ func TestTrackWANPrefixSnoopingSeedsSilentlyOnFirstRA(t *testing.T) {
 	want := netip.MustParsePrefix("2001:db8:1::/64")
 	trackWANPrefixSnooping(wan, buildTestRA(want))
 
-	if wan.currentWANPrefix != want {
-		t.Fatalf("currentWANPrefix = %v, want %v", wan.currentWANPrefix, want)
+	if !wan.knownWANPrefixes[want] {
+		t.Fatalf("knownWANPrefixes = %v, want %v present", wan.knownWANPrefixes, want)
 	}
 	if len(activePrefixWatches) != 0 {
 		t.Fatalf("first (seeding) RA must not start any deprecation watch, got %v", activePrefixWatches)
 	}
 }
 
-func TestTrackWANPrefixSnoopingRequiresThresholdMismatches(t *testing.T) {
+func TestTrackWANPrefixSnoopingAddsNewPrefixImmediately(t *testing.T) {
 	withCleanPrefixWatchState(t)
 
 	wan := &Interface{Name: "wan", Ifname: "wan0", Master: true}
@@ -121,21 +121,47 @@ func TestTrackWANPrefixSnoopingRequiresThresholdMismatches(t *testing.T) {
 
 	trackWANPrefixSnooping(wan, buildTestRA(oldPrefix)) // seed
 
-	// Below-threshold mismatches must not switch currentWANPrefix yet.
+	// An RA can carry a brand new prefix without withdrawing the old one -
+	// it must be trusted right away (no threshold needed to *add* a
+	// prefix), and the old one must not be dropped after just one RA that
+	// happens not to repeat it.
 	trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
-	trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
-	if wan.currentWANPrefix != oldPrefix {
-		t.Fatalf("currentWANPrefix switched early: %v", wan.currentWANPrefix)
-	}
 
-	// The threshold-th (default 3) mismatching RA confirms the switch.
-	trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
-	if wan.currentWANPrefix != newPrefix {
-		t.Fatalf("currentWANPrefix = %v, want %v after %d mismatches", wan.currentWANPrefix, newPrefix, prefixMismatchThreshold)
+	if !wan.knownWANPrefixes[newPrefix] {
+		t.Fatalf("newly-seen prefix %s should be known immediately, got %v", newPrefix, wan.knownWANPrefixes)
+	}
+	if !wan.knownWANPrefixes[oldPrefix] {
+		t.Fatalf("old prefix %s should not be dropped after a single miss, got %v", oldPrefix, wan.knownWANPrefixes)
 	}
 }
 
-func TestTrackWANPrefixSnoopingResetsMismatchCountOnMatch(t *testing.T) {
+func TestTrackWANPrefixSnoopingDropsPrefixAfterThresholdConsecutiveMisses(t *testing.T) {
+	withCleanPrefixWatchState(t)
+
+	wan := &Interface{Name: "wan", Ifname: "wan0", Master: true}
+	interfaces["wan"] = wan
+
+	oldPrefix := netip.MustParsePrefix("2001:db8:1::/64")
+	newPrefix := netip.MustParsePrefix("2001:db8:2::/64")
+
+	trackWANPrefixSnooping(wan, buildTestRA(oldPrefix)) // seed
+
+	for i := 0; i < prefixMismatchThreshold-1; i++ {
+		trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
+	}
+	if !wan.knownWANPrefixes[oldPrefix] {
+		t.Fatalf("old prefix %s dropped too early, got %v", oldPrefix, wan.knownWANPrefixes)
+	}
+
+	// The threshold-th consecutive RA missing oldPrefix (from both the RA
+	// itself and the interface's own address list) confirms it dead.
+	trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
+	if wan.knownWANPrefixes[oldPrefix] {
+		t.Fatalf("old prefix %s should have been dropped after %d consecutive misses, got %v", oldPrefix, prefixMismatchThreshold, wan.knownWANPrefixes)
+	}
+}
+
+func TestTrackWANPrefixSnoopingResetsMissCountOnMatch(t *testing.T) {
 	withCleanPrefixWatchState(t)
 
 	wan := &Interface{Name: "wan", Ifname: "wan0", Master: true}
@@ -148,12 +174,38 @@ func TestTrackWANPrefixSnoopingResetsMismatchCountOnMatch(t *testing.T) {
 
 	trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
 	trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
-	// A real RA of the still-current prefix in between resets the streak.
+	// A real RA re-carrying oldPrefix in between resets its miss streak.
 	trackWANPrefixSnooping(wan, buildTestRA(oldPrefix))
 	trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
 	trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
 
-	if wan.currentWANPrefix != oldPrefix {
-		t.Fatalf("currentWANPrefix = %v, want %v (mismatch streak should have been reset)", wan.currentWANPrefix, oldPrefix)
+	if !wan.knownWANPrefixes[oldPrefix] {
+		t.Fatalf("old prefix %s should still be known (miss streak was reset), got %v", oldPrefix, wan.knownWANPrefixes)
 	}
 }
+
+func TestTrackWANPrefixSnoopingWANAddressPreventsDrop(t *testing.T) {
+	withCleanPrefixWatchState(t)
+
+	oldPrefix := netip.MustParsePrefix("2001:db8:1::/64")
+	newPrefix := netip.MustParsePrefix("2001:db8:2::/64")
+
+	wan := &Interface{Name: "wan", Ifname: "wan0", Master: true, Addr6: []IPAddr{
+		// The interface itself still has a real address under oldPrefix,
+		// even though upstream stops repeating it in the RA (e.g. spread
+		// across separate RAs) - it must never be treated as a mismatch.
+		{Addr: mustParseAddr("2001:db8:1::1"), PrefixLen: 64},
+	}}
+	interfaces["wan"] = wan
+
+	trackWANPrefixSnooping(wan, buildTestRA(oldPrefix)) // seed
+
+	for i := 0; i < prefixMismatchThreshold+2; i++ {
+		trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
+	}
+
+	if !wan.knownWANPrefixes[oldPrefix] {
+		t.Fatalf("prefix %s backed by a real WAN address must never be dropped, got %v", oldPrefix, wan.knownWANPrefixes)
+	}
+}
+

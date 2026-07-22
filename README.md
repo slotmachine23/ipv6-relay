@@ -75,17 +75,19 @@ sudo chmod 644 /etc/ipv6-relay/config.json
 | 字段 | 是否必选 | 说明 |
 |------|----------|------|
 | `log_level` | 可选，默认 4 | 日志级别 0-7（同 `-l` 命令行参数，配置文件优先级低于显式传入的 `-l`） |
-| `notify_prefix_deprecation` | 可选，默认 `true` | 是否在检测到 WAN 口前缀被更新的前缀取代时，向 LAN 侧仍在使用旧前缀地址的邻居发送 lifetime=0 的终结通告（见下方说明） |
-| `prefix_mismatch_packet_threshold` | 可选，默认 3 | 实时 snoop WAN 口收到的真实 RA 报文时，连续多少个报文携带同一个、与当前记录不同的 ULA/公网前缀，才判定前缀确实已经更换（防止上游把多个仍然有效的前缀分散在不同 RA 里发送时被误判） |
-| `prefix_deprecation_interval_seconds` | 可选，默认 300 | 确认前缀被取代后，终结通告的重发间隔（秒），直到 LAN 侧不再有使用该前缀地址的邻居为止才停止 |
+| `notify_prefix_deprecation` | 可选，默认 `true` | 是否在检测到 WAN 口某个前缀确实已经消失时，向 LAN 侧仍在使用该前缀地址的邻居发送 lifetime=0 的终结通告（见下方说明） |
+| `prefix_mismatch_packet_threshold` | 可选，默认 3 | 实时 snoop WAN 口收到的真实 RA 报文时，一个已记录的前缀连续多少次既没有出现在 RA 里、WAN 口自己也没有对应地址了，才判定它确实消失（防止上游把多个仍然有效的前缀分散在不同 RA 里发送时被误判） |
+| `prefix_deprecation_interval_seconds` | 可选，默认 300 | 确认前缀消失后，终结通告的重发间隔（秒），直到 LAN 侧不再有使用该前缀地址的邻居为止才停止 |
 
 本项目会对每个 `master` 接口实时 snoop 收到的真实 RA 报文，解析其中的 PIO（Prefix Information
-Option），只关心 ULA（`fc00::/7`）或公网可路由的前缀（不含 link-local、组播）。当连续
-`prefix_mismatch_packet_threshold` 个 RA 都携带同一个、与当前记录不同的前缀时，才判定 WAN
-前缀确实被替换了（例如上游重新编号/更换了前缀，但没有正确发送 `valid_lft=0`/`preferred_lft=0`
-的撤回通告）——单个 RA 里出现一次不同的前缀不会立即触发，避免把上游偶尔把多个仍然有效的前缀
-分散在不同 RA 里发送误判成前缀更换。接口刚启动收到的第一个真实 RA 只会静默记录当前前缀，不会
-触发通告，避免把重启前就已存在的合法前缀误判为"过时"。一旦确认某个前缀被取代，就会向所有下游
+Option），只关心 ULA（`fc00::/7`）或公网可路由的前缀（不含 link-local、组播），并且是**一个集合**
+而不是单一前缀——RA 本来就可以同时携带多个前缀，WAN 口自己也可能同时有多个前缀下的地址，只要某个
+前缀出现在这次收到的 RA 里，或者 WAN 口自己当前就有这个前缀下的地址，就都算它仍然有效，不会当成
+过时。只有一个已记录的前缀连续 `prefix_mismatch_packet_threshold` 次，既没有出现在 RA 里、WAN
+口自己也没有对应地址了，才判定它确实消失了（例如上游重新编号/更换了前缀，但没有正确发送
+`valid_lft=0`/`preferred_lft=0` 的撤回通告）——这样即使上游把多个仍然有效的前缀分散在不同 RA
+里发送，也不会被误判成前缀消失。接口刚启动收到的第一个真实 RA 只会静默记录当前的前缀集合，不会
+触发通告，避免把重启前就已存在的合法前缀误判为"过时"。一旦确认某个前缀消失了，就会向所有下游
 （非 `master`）接口里仍有该前缀下地址的邻居，发送一份只带有该前缀 PIO（Valid/Preferred
 Lifetime 均为 0）的合成 RA，之后每隔 `prefix_deprecation_interval_seconds` 重发一次，直到 LAN
 侧的邻居表里再也找不到该前缀下的地址为止。

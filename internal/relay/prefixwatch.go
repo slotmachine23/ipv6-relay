@@ -18,16 +18,18 @@ import (
 // renumber a delegated prefix without ever sending a proper RFC 4861
 // zero-lifetime withdrawal for the old one, left on by default.
 //
-// *Detection* is driven entirely by real-time snooping of the actual
-// Router Advertisements received on each master (WAN) interface - not by a
-// timer or by polling the kernel's address list: every RA that carries a
-// ULA/GUA prefix different from the interface's currently-known prefix
-// counts as one "mismatch" packet; once prefixMismatchThreshold consecutive
-// mismatches for the *same* candidate prefix are seen, that candidate is
-// promoted to "current" and the previous one is treated as dead. Once dead,
-// *notifying* LAN neighbors still using it IS periodic/timer-based (see
-// startPrefixDeprecationWatch), repeating every prefixDeprecationInterval
-// until none remain.
+// *Detection* is driven by real-time snooping of the actual Router
+// Advertisements received on each master (WAN) interface, cross-checked
+// against that interface's own current kernel address list - not by a
+// timer or by polling the address list alone: an RA can legitimately carry
+// several prefixes at once (and the interface can legitimately hold
+// addresses under several of them at once), so any prefix that appears in
+// *either* the just-received RA or the interface's own address list is
+// never treated as a mismatch. A previously-known prefix is only declared
+// dead once it is absent from *both* for prefixMismatchThreshold
+// consecutive real RAs. Once dead, *notifying* LAN neighbors still using
+// it IS periodic/timer-based (see startPrefixDeprecationWatch), repeating
+// every prefixDeprecationInterval until none remain.
 var (
 	prefixDeprecationEnabled  = true
 	prefixMismatchThreshold   = 3
@@ -102,61 +104,93 @@ func parsePIOPrefixes(data []byte) []netip.Prefix {
 	return out
 }
 
+// wanAddrPrefixes returns the set of ULA/globally-routable prefixes
+// currently backed by a real (non-tentative, unexpired) address on iface,
+// masked to each address's own prefix length.
+func wanAddrPrefixes(iface *Interface) map[netip.Prefix]bool {
+	now := uint32(nowMono())
+	out := map[netip.Prefix]bool{}
+
+	for _, a := range iface.Addr6 {
+		if a.Tentative || !(isULA(a.Addr) || isGlobalUnicast(a.Addr)) {
+			continue
+		}
+		if a.ValidLT != 0 && a.ValidLT <= now {
+			continue // already expired, kernel just hasn't reaped it yet
+		}
+		out[netip.PrefixFrom(a.Addr, int(a.PrefixLen)).Masked()] = true
+	}
+	return out
+}
+
 // trackWANPrefixSnooping is called for every real Router Advertisement
 // received on a master interface (see handleICMPv6/captureLastRAHeader in
-// router.go). It updates the interface's mismatch-count-based view of
-// which single ULA/GUA prefix is currently "live", purely from real-time
-// packet snooping (no periodic polling, no kernel address-list involved):
-// every RA carrying a prefix other than iface.currentWANPrefix counts as
-// one mismatch against that candidate prefix, and once
-// prefixMismatchThreshold consecutive mismatches for the *same* candidate
-// are seen, it is promoted to current and the old one is handed off to
-// startPrefixDeprecationWatch. The very first real RA observed on an
-// interface only silently seeds currentWANPrefix (so a fresh (re)start
-// never misjudges an already-legitimate prefix as a mismatch just because
-// it hasn't been observed before). Must run on the Engine goroutine.
+// router.go). It maintains iface.knownWANPrefixes, the set of ULA/GUA
+// prefixes currently considered "live" on this interface, from real-time
+// packet snooping cross-checked against the interface's own current
+// kernel address list (see wanAddrPrefixes): a prefix carried by this RA,
+// or already backed by a real address on iface, is never a mismatch and is
+// (re)confirmed as known immediately. A previously-known prefix that
+// appears in neither is only declared dead after prefixMismatchThreshold
+// consecutive real RAs miss it both ways, at which point it's handed off
+// to startPrefixDeprecationWatch. The very first real RA observed on an
+// interface only silently seeds knownWANPrefixes (so a fresh (re)start
+// never misjudges an already-legitimate prefix as dead just because it
+// hasn't been observed before). Must run on the Engine goroutine.
 func trackWANPrefixSnooping(iface *Interface, data []byte) {
-	prefixes := parsePIOPrefixes(data)
+	raPrefixes := parsePIOPrefixes(data)
+	addrPrefixes := wanAddrPrefixes(iface)
+
+	confirmed := map[netip.Prefix]bool{}
+	for _, p := range raPrefixes {
+		confirmed[p] = true
+	}
+	for p := range addrPrefixes {
+		confirmed[p] = true
+	}
+
+	if iface.knownWANPrefixes == nil {
+		iface.knownWANPrefixes = map[netip.Prefix]bool{}
+	}
 
 	if !iface.wanPrefixSeeded {
 		iface.wanPrefixSeeded = true
-		if len(prefixes) > 0 {
-			iface.currentWANPrefix = prefixes[0]
+		for p := range confirmed {
+			iface.knownWANPrefixes[p] = true
 		}
 		return
 	}
 
-	for _, p := range prefixes {
-		if p == iface.currentWANPrefix {
-			iface.mismatchCandidate = netip.Prefix{}
-			iface.mismatchCount = 0
+	// Anything seen in this RA or already assigned on the interface is
+	// confirmed live: add it (if new) and clear any accumulated miss count.
+	for p := range confirmed {
+		iface.knownWANPrefixes[p] = true
+		delete(iface.missCounts, p)
+	}
+
+	// Anything previously known but absent from both this RA and the
+	// interface's own address list accumulates a miss; only declared dead
+	// after prefixMismatchThreshold consecutive misses.
+	for p := range iface.knownWANPrefixes {
+		if confirmed[p] {
 			continue
 		}
 
-		if p != iface.mismatchCandidate {
-			iface.mismatchCandidate = p
-			iface.mismatchCount = 1
-		} else {
-			iface.mismatchCount++
+		if iface.missCounts == nil {
+			iface.missCounts = map[netip.Prefix]int{}
 		}
-
-		if iface.mismatchCount < prefixMismatchThreshold {
+		iface.missCounts[p]++
+		if iface.missCounts[p] < prefixMismatchThreshold {
 			continue
 		}
 
-		old := iface.currentWANPrefix
-		iface.currentWANPrefix = p
-		iface.mismatchCandidate = netip.Prefix{}
-		iface.mismatchCount = 0
+		delete(iface.knownWANPrefixes, p)
+		delete(iface.missCounts, p)
 
-		if !old.IsValid() || old == p {
-			continue
-		}
+		Noticef("WAN prefix %s on %s missing from %d consecutive RAs and no longer assigned to the interface, notifying LAN neighbors under it",
+			p, iface.Ifname, prefixMismatchThreshold)
 
-		Noticef("WAN prefix %s on %s replaced by %s after %d mismatching packets, notifying LAN neighbors under it",
-			old, iface.Ifname, p, prefixMismatchThreshold)
-
-		startPrefixDeprecationWatch(iface, old)
+		startPrefixDeprecationWatch(iface, p)
 	}
 }
 
