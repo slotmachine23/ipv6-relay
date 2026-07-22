@@ -59,19 +59,7 @@ sudo chmod 755 /etc/ipv6-relay
 sudo chmod 644 /etc/ipv6-relay/config.json
 ```
 
-配置文件示例：
-
-```json
-{
-    "global": {
-        "log_level": 5
-    },
-    "interfaces": {
-        "wan": { "ifname": "eth0", "master": true },
-        "lan": { "ifname": "eth1" }
-    }
-}
-```
+配置文件示例：见 [`config.json.example`](config.json.example)（里面列出了每个可配置字段，没有隐藏参数）。
 
 `interfaces` 下每个条目的键名（示例里的 `wan`/`lan`）只是自己起的标识名，随便叫什么都行，程序只认里面的字段：
 
@@ -79,6 +67,14 @@ sudo chmod 644 /etc/ipv6-relay/config.json
 |------|----------|------|
 | `ifname` | 必选 | 系统上真实的网卡名（如 `eth0`） |
 | `master` | 可选，默认 `false` | 标记这是上游（WAN）接口 |
+| `ndproxy_routing` | 可选，默认 `true` | 是否为这个接口上镜像的邻居地址安装 `/128` 主机路由（配合 proxy-NDP 一起生效，关掉后只装 proxy-NDP 代理表项、不装路由） |
+| `ndp_from_link_local` | 可选，默认 `true` | 主动探测/中继报文（如邻居探测、路由器请求）发送时是否优先使用本接口的 link-local 地址作为源地址，而不是回退到默认的发送方式 |
+
+`global` 下目前只有一个字段：
+
+| 字段 | 是否必选 | 说明 |
+|------|----------|------|
+| `log_level` | 可选，默认 4 | 日志级别 0-7（同 `-l` 命令行参数，配置文件优先级低于显式传入的 `-l`） |
 
 本项目只做 relay，不支持其他模式，所以**只要接口出现在配置里，就会同时中继 DHCPv6 / RA / NDP 三种服务**，不需要（也无法）单独开关；不想中继某个接口，直接把它从配置里删掉即可。`master` 用来标记哪一侧是上游：至少要有一个接口设为 `"master": true`，其余不带 `master` 的接口视为下游（LAN 侧）。
 

@@ -4,11 +4,16 @@
   },
   "interfaces": {
     "lan": {
-      "ifname": "eth1"
+      "ifname": "eth1",
+      "master": false,
+      "ndproxy_routing": true,
+      "ndp_from_link_local": true
     },
     "wan": {
       "ifname": "eth0",
-      "master": true
+      "master": true,
+      "ndproxy_routing": true,
+      "ndp_from_link_local": true
     }
   }
 }
