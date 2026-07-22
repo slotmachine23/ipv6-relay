@@ -212,3 +212,32 @@ func TestTrackWANPrefixSnoopingDropsPrefixEvenIfKernelAddressLingers(t *testing.
 	}
 }
 
+// TestTrackWANPrefixSnoopingSeedsWithNewPrefixAfterRestart is a regression
+// test for the exact restart scenario the orphaned-LAN-neighbor backstop
+// (checkForOrphanedLANNeighbors) exists for: the WAN renumbers, the daemon
+// restarts, and the very first real RA it sees after that already carries
+// only the new prefix - so knownWANPrefixes gets silently seeded with just
+// the new one and never personally observes the old prefix dying.
+func TestTrackWANPrefixSnoopingSeedsWithNewPrefixAfterRestart(t *testing.T) {
+	withCleanPrefixWatchState(t)
+
+	wan := &Interface{Name: "wan", Ifname: "wan0", Master: true}
+	interfaces["wan"] = wan
+
+	oldPrefix := netip.MustParsePrefix("2001:db8:1::/64")
+	newPrefix := netip.MustParsePrefix("2001:db8:2::/64")
+
+	// Simulates the daemon starting up fresh after the WAN already
+	// renumbered: the first real RA it ever sees only carries newPrefix.
+	// (checkForOrphanedLANNeighbors also runs here, but is a no-op since
+	// no LAN interfaces are registered in this test.)
+	trackWANPrefixSnooping(wan, buildTestRA(newPrefix))
+
+	if wan.knownWANPrefixes[oldPrefix] {
+		t.Fatalf("a fresh start must never know about a prefix it never observed, got %v", wan.knownWANPrefixes)
+	}
+	if !wan.knownWANPrefixes[newPrefix] {
+		t.Fatalf("newPrefix should be seeded as known, got %v", wan.knownWANPrefixes)
+	}
+}
+

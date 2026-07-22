@@ -37,6 +37,18 @@ import (
 // at all, they can turn it off entirely via global.notify_prefix_deprecation
 // - that is the intended off switch, not silently disabling detection via
 // an address-list fallback.
+//
+// Detection alone would still miss one case: knownWANPrefixes is purely
+// in-memory, so a (re)start silently reseeds it from scratch (see
+// trackWANPrefixSnooping) - if the WAN had already renumbered before the
+// restart, the daemon never personally observes the old prefix's mismatch
+// streak run out, and a LAN host that hadn't yet dropped its old address
+// would otherwise be left stranded forever. checkForOrphanedLANNeighbors
+// is the backstop for exactly that: after every real RA, it also checks
+// every LAN neighbor's address against the union of every seeded master's
+// currently-known prefixes and starts notifying any address that doesn't
+// fall under any of them, regardless of whether this process ever
+// personally watched that prefix die.
 var (
 	prefixDeprecationEnabled  = true
 	prefixMismatchThreshold   = 3
@@ -142,6 +154,7 @@ func trackWANPrefixSnooping(iface *Interface, data []byte) {
 		for p := range confirmed {
 			iface.knownWANPrefixes[p] = true
 		}
+		checkForOrphanedLANNeighbors(iface)
 		return
 	}
 
@@ -175,6 +188,95 @@ func trackWANPrefixSnooping(iface *Interface, data []byte) {
 			p, iface.Ifname, prefixMismatchThreshold)
 
 		startPrefixDeprecationWatch(iface, p)
+	}
+
+	checkForOrphanedLANNeighbors(iface)
+}
+
+// checkForOrphanedLANNeighbors is the restart-safety backstop for this
+// feature: trackWANPrefixSnooping's own knownWANPrefixes is purely
+// in-memory and gets silently reseeded from scratch on every (re)start, so
+// if the WAN had already renumbered before a restart, the daemon never
+// personally observes the old prefix's mismatch streak run out - it just
+// starts fresh, already only knowing the new prefix. Without this check, a
+// LAN host that hadn't yet dropped its old-prefix address before the
+// restart (RFC 4862 5.5.3(e) alone can keep one usable for up to ~2h after
+// a real deprecation, and indefinitely if no deprecation was ever sent at
+// all) would keep trying to use it and fail, with nothing left to ever
+// tell it otherwise. So, alongside comparing this RA against the WAN
+// prefix set, also enumerate every LAN neighbor's address and check it
+// against the same set: any ULA/GUA neighbor address not covered by any
+// currently-known WAN prefix (from any seeded master) is orphaned and gets
+// a deprecation watch started for its /64 - the real neighbor cache
+// doesn't record the prefix length a host actually configured, so /64 (the
+// de-facto standard SLAAC length) is the best grouping key available.
+func checkForOrphanedLANNeighbors(masterIface *Interface) {
+	known := map[netip.Prefix]bool{}
+	anySeeded := false
+	for _, iface := range interfaces {
+		if !iface.Master || !iface.wanPrefixSeeded {
+			continue
+		}
+		anySeeded = true
+		for p := range iface.knownWANPrefixes {
+			known[p] = true
+		}
+	}
+	if !anySeeded {
+		return
+	}
+
+	orphaned := map[netip.Prefix]bool{}
+	for _, c := range interfaces {
+		if c.Master || c.RA != ModeRelay {
+			continue
+		}
+
+		link, err := netlink.LinkByIndex(c.Ifindex)
+		if err != nil {
+			continue
+		}
+		neighs, err := netlink.NeighList(link.Attrs().Index, unix.AF_INET6)
+		if err != nil {
+			continue
+		}
+
+		for _, n := range neighs {
+			if n.Flags&unix.NTF_PROXY != 0 {
+				continue // our own proxy-NDP entries, not real neighbors
+			}
+
+			addr, ok := netip.AddrFromSlice(n.IP.To16())
+			if !ok {
+				continue
+			}
+			addr = addr.Unmap()
+			if !trackablePrefixAddr(addr) {
+				continue
+			}
+
+			covered := false
+			for p := range known {
+				if p.Contains(addr) {
+					covered = true
+					break
+				}
+			}
+			if covered {
+				continue
+			}
+
+			orphaned[netip.PrefixFrom(addr, 64).Masked()] = true
+		}
+	}
+
+	for p := range orphaned {
+		if activePrefixWatches[p] != nil {
+			continue
+		}
+
+		Noticef("LAN neighbor address under %s doesn't fall under any currently-known WAN prefix (restart backstop), notifying it", p)
+		startPrefixDeprecationWatch(masterIface, p)
 	}
 }
 
