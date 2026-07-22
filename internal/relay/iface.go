@@ -59,6 +59,26 @@ type Interface struct {
 	raSent   int
 	rsTimer  *time.Timer
 	rsTimerN int // generation counter to invalidate stale timers after reload
+
+	// knownWANPrefixes/wanPrefixSeeded back evaluateWANPrefixes (see
+	// prefixwatch.go): the set of ULA/GUA prefixes currently considered
+	// "live" on this master interface, based purely on its own current
+	// kernel address list (no RA/PIO packet parsing involved).
+	knownWANPrefixes map[netip.Prefix]bool
+	wanPrefixSeeded  bool
+
+	// lastRA* caches the fixed header of the last real Router Advertisement
+	// relayed on this master interface, so a synthesized prefix-deprecation
+	// RA (see sendPrefixDeprecationRA) can copy its Cur Hop Limit/Flags/
+	// Router Lifetime/Reachable Time/Retrans Timer instead of guessing
+	// values that could otherwise affect default-router selection on
+	// downstream hosts.
+	haveLastRA           bool
+	lastRAHopLimit       uint8
+	lastRAFlags          uint8
+	lastRARouterLifetime uint16
+	lastRAReachableTime  uint32
+	lastRARetransTimer   uint32
 }
 
 // interfaces holds every configured interface keyed by its config name.

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/binary"
 	"net/netip"
 	"time"
 
@@ -320,6 +321,26 @@ func handleICMPv6(rs *routerSock, data []byte) {
 	case ndRouterSolicit:
 		forwardRouterSolicitation(iface)
 	case ndRouterAdvert:
+		if iface.Master {
+			captureLastRAHeader(iface, data)
+		}
 		forwardRouterAdvertisement(iface, data)
 	}
+}
+
+// captureLastRAHeader remembers the fixed header fields of a real Router
+// Advertisement received on a master interface, so a later synthesized
+// prefix-deprecation RA (see prefixwatch.go) can reuse them instead of
+// guessing values that could otherwise affect default-router selection.
+func captureLastRAHeader(iface *Interface, data []byte) {
+	const raHdrLen = 16 // sizeof(struct nd_router_advert)
+	if len(data) < raHdrLen {
+		return
+	}
+	iface.haveLastRA = true
+	iface.lastRAHopLimit = data[4]
+	iface.lastRAFlags = data[5]
+	iface.lastRARouterLifetime = binary.BigEndian.Uint16(data[6:8])
+	iface.lastRAReachableTime = binary.BigEndian.Uint32(data[8:12])
+	iface.lastRARetransTimer = binary.BigEndian.Uint32(data[12:16])
 }

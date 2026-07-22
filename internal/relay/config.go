@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -19,7 +20,9 @@ type Config struct {
 var Cfg = Config{}
 
 type jsonGlobal struct {
-	LogLevel *int `json:"log_level"`
+	LogLevel                         *int  `json:"log_level"`
+	NotifyPrefixDeprecation          *bool `json:"notify_prefix_deprecation"`
+	PrefixDeprecationIntervalSeconds *int  `json:"prefix_deprecation_interval_seconds"`
 }
 
 type jsonIface struct {
@@ -74,6 +77,9 @@ func fetchAddr6(ifindex int) []IPAddr {
 func refreshInterfaceAddresses(iface *Interface) {
 	iface.Addr6 = fetchAddr6(iface.Ifindex)
 	updateLinkLocalState(iface)
+	if iface.Master {
+		evaluateWANPrefixes(iface)
+	}
 }
 
 func updateLinkLocalState(iface *Interface) {
@@ -173,6 +179,14 @@ func loadConfigJSON(path string) {
 	if root.Global != nil && root.Global.LogLevel != nil && !Cfg.LogLevelCmdline {
 		SetLogLevel(*root.Global.LogLevel)
 		Noticef("Log level set to %d", LogLevel())
+	}
+
+	if root.Global != nil && root.Global.NotifyPrefixDeprecation != nil {
+		prefixDeprecationEnabled = *root.Global.NotifyPrefixDeprecation
+	}
+	if root.Global != nil && root.Global.PrefixDeprecationIntervalSeconds != nil &&
+		*root.Global.PrefixDeprecationIntervalSeconds > 0 {
+		prefixDeprecationInterval = time.Duration(*root.Global.PrefixDeprecationIntervalSeconds) * time.Second
 	}
 
 	for name, ifaceObj := range root.Interfaces {
