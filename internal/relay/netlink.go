@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"syscall"
 	"time"
 
@@ -83,9 +84,34 @@ func StartNetlinkMonitor(done <-chan struct{}) error {
 		}
 	}()
 
-	startMirrorSweep(done)
+	// Deferred to the first Reload() (see mirrorSweepOnce/scheduleMirrorSweep)
+	// rather than started here: at this point config.json hasn't been loaded
+	// yet, so mirrorSweepInterval would still be the built-in default even if
+	// the config overrides it via global.mirror_sweep_interval_seconds.
+	mirrorSweepDone = done
 
 	return nil
+}
+
+// mirrorSweepDone is StartNetlinkMonitor's done channel, stashed here so
+// scheduleMirrorSweep (called from Reload, once config is loaded) can start
+// the periodic sweep with the correct configured interval from the start.
+var mirrorSweepDone <-chan struct{}
+
+// mirrorSweepOnce ensures the periodic sweep is only ever started once,
+// regardless of how many times Reload() runs (SIGHUP).
+var mirrorSweepOnce sync.Once
+
+// scheduleMirrorSweep starts the periodic mirror sweep on its first call
+// (a no-op on subsequent calls), using whatever mirrorSweepInterval is in
+// effect at that point. Must be called after loadConfigJSON so a configured
+// global.mirror_sweep_interval_seconds is already applied.
+func scheduleMirrorSweep() {
+	mirrorSweepOnce.Do(func() {
+		if mirrorSweepDone != nil {
+			startMirrorSweep(mirrorSweepDone)
+		}
+	})
 }
 
 // ourRouteMetric is the priority the daemon installs its persistent downstream
@@ -116,7 +142,11 @@ const ourRouteMetric = 1024
 // but-ping-blocking host as dead. The probe result lands asynchronously, so
 // a host pushed to FAILED by this pass is picked up on the *next* sweep (or
 // immediately by handleNeighEvent, since that also watches for it).
-const mirrorSweepInterval = 300 * time.Second
+//
+// Overridable via global.mirror_sweep_interval_seconds in config.json (see
+// config.go's loadConfigJSON) - a package var rather than a const for that
+// reason, default unchanged.
+var mirrorSweepInterval = 300 * time.Second
 
 // startMirrorSweep arranges for sweepFailedAndOrphans to run every
 // mirrorSweepInterval until done is closed.
