@@ -75,10 +75,10 @@ sudo chmod 644 /etc/ipv6-relay/config.json
 | 字段 | 是否必选 | 说明 |
 |------|----------|------|
 | `log_level` | 可选，默认 4 | 日志级别 0-7（同 `-l` 命令行参数，配置文件优先级低于显式传入的 `-l`） |
-| `notify_prefix_deprecation` | 可选，默认 `true` | 是否在检测到 WAN 口某个前缀确实已经消失时，向 LAN 侧仍在使用该前缀地址的邻居发送 lifetime=0 的终结通告（见下方说明）——如果不想要这个自动发送终结通告的行为，直接关掉这个开关即可 |
+| `send_prefix_deprecation` | 可选，默认 `true` | 是否在检测到 WAN 口某个前缀确实已经消失时，向 LAN 侧仍在使用该前缀地址的邻居发送 lifetime=0 的终结通告（见下方说明）——如果不想要这个自动发送终结通告的行为，直接关掉这个开关即可 |
 | `prefix_mismatch_packet_threshold` | 可选，默认 3 | 实时 snoop WAN 口收到的真实 RA 报文时，一个已记录的前缀连续多少次没有出现在 RA 里，才判定它确实消失（防止上游把多个仍然有效的前缀分散在不同 RA 里发送时被误判） |
-| `prefix_withdraw_interval_seconds` | 可选，默认 300 | 确认前缀消失后，终结通告的重发间隔（秒），直到 LAN 侧不再有使用该前缀地址的邻居为止才停止 |
-| `mirror_sweep_interval_seconds` | 可选，默认 300 | 周期性兜底扫描的间隔（秒）：清理已经 `NUD_FAILED` 或邻居表项已消失的镜像（proxy-NDP + `/128` 主机路由），并主动探测处于 `NUD_STALE` 的邻居 |
+| `send_prefix_deprecation_interval_seconds` | 可选，默认 300 | 确认前缀消失后，终结通告的重发间隔（秒），直到 LAN 侧不再有使用该前缀地址的邻居为止才停止 |
+| `stale_client_sweep_interval_seconds` | 可选，默认 300 | 周期性兜底扫描的间隔（秒）：清理已经 `NUD_FAILED` 或邻居表项已消失的镜像（proxy-NDP + `/128` 主机路由），并主动探测处于 `NUD_STALE` 的邻居 |
 
 本项目会对每个 `master` 接口实时 snoop 收到的真实 RA 报文，解析其中的 PIO（Prefix Information
 Option），只关心 ULA（`fc00::/7`）或公网可路由的前缀（不含 link-local、组播），并且是**一个集合**
@@ -92,7 +92,7 @@ Option），只关心 ULA（`fc00::/7`）或公网可路由的前缀（不含 li
 被误判成前缀消失。接口刚启动收到的第一个真实 RA 只会静默记录当前的前缀集合，不会触发通告，避免
 把重启前就已存在的合法前缀误判为"过时"。一旦确认某个前缀消失了，就会向所有下游
 （非 `master`）接口里仍有该前缀下地址的邻居，发送一份只带有该前缀 PIO（Valid/Preferred
-Lifetime 均为 0）的合成 RA，之后每隔 `prefix_withdraw_interval_seconds` 重发一次，直到 LAN
+Lifetime 均为 0）的合成 RA，之后每隔 `send_prefix_deprecation_interval_seconds` 重发一次，直到 LAN
 侧的邻居表里再也找不到该前缀下的地址为止。
 
 这套前缀集合本身只在内存里，进程重启后会清空重新静默记录，所以还有一种情况需要额外处理：如果

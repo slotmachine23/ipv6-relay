@@ -9,10 +9,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// prefixDeprecationEnabled/prefixMismatchThreshold/prefixWithdrawInterval
+// sendPrefixDeprecation/prefixMismatchThreshold/sendPrefixDeprecationInterval
 // are the global tunables the user gets for this feature (config.json's
-// global.notify_prefix_deprecation / global.prefix_mismatch_packet_threshold
-// / global.prefix_withdraw_interval_seconds - see config.go's
+// global.send_prefix_deprecation / global.prefix_mismatch_packet_threshold
+// / global.send_prefix_deprecation_interval_seconds - see config.go's
 // loadConfigJSON). Deliberately package vars with sane defaults rather than
 // requiring config: this is a mitigation for upstream routers that
 // renumber a delegated prefix without ever sending a proper RFC 4861
@@ -32,9 +32,9 @@ import (
 // previously-known prefix is only declared dead once it is absent from
 // prefixMismatchThreshold consecutive real RAs. Once dead, *notifying* LAN
 // neighbors still using it IS periodic/timer-based (see
-// startPrefixDeprecationWatch), repeating every prefixWithdrawInterval
+// startPrefixDeprecationWatch), repeating every sendPrefixDeprecationInterval
 // until none remain. If the user doesn't want this automatic notification
-// at all, they can turn it off entirely via global.notify_prefix_deprecation
+// at all, they can turn it off entirely via global.send_prefix_deprecation
 // - that is the intended off switch, not silently disabling detection via
 // an address-list fallback.
 //
@@ -50,9 +50,9 @@ import (
 // fall under any of them, regardless of whether this process ever
 // personally watched that prefix die.
 var (
-	prefixDeprecationEnabled = true
-	prefixMismatchThreshold  = 3
-	prefixWithdrawInterval   = 300 * time.Second
+	sendPrefixDeprecation         = true
+	prefixMismatchThreshold       = 3
+	sendPrefixDeprecationInterval = 300 * time.Second
 )
 
 // isULA reports whether addr is a Unique Local Address (fc00::/7, RFC 4193).
@@ -290,14 +290,14 @@ type prefixDeprecationWatch struct {
 }
 
 // startPrefixDeprecationWatch begins (if not already running, and if not
-// disabled by global.notify_prefix_deprecation) repeatedly notifying LAN
+// disabled by global.send_prefix_deprecation) repeatedly notifying LAN
 // neighbors still using an address under prefix that it is dead, every
-// prefixWithdrawInterval, until no such neighbor remains.
+// sendPrefixDeprecationInterval, until no such neighbor remains.
 func startPrefixDeprecationWatch(masterIface *Interface, prefix netip.Prefix) {
 	if _, exists := activePrefixWatches[prefix]; exists {
 		return
 	}
-	if !prefixDeprecationEnabled {
+	if !sendPrefixDeprecation {
 		Noticef("Prefix deprecation notifications disabled by config, not notifying LAN for %s", prefix)
 		return
 	}
@@ -308,7 +308,7 @@ func startPrefixDeprecationWatch(masterIface *Interface, prefix netip.Prefix) {
 }
 
 // firePrefixDeprecationWatch sends one round of the deprecation RA and
-// either reschedules itself in prefixWithdrawInterval, or - once no LAN
+// either reschedules itself in sendPrefixDeprecationInterval, or - once no LAN
 // neighbor remains under prefix - stops and forgets this watch.
 func firePrefixDeprecationWatch(masterIface *Interface, prefix netip.Prefix, w *prefixDeprecationWatch) {
 	remaining := sendPrefixDeprecationRA(masterIface, prefix)
@@ -318,7 +318,7 @@ func firePrefixDeprecationWatch(masterIface *Interface, prefix netip.Prefix, w *
 		return
 	}
 
-	w.timer = time.AfterFunc(prefixWithdrawInterval, func() {
+	w.timer = time.AfterFunc(sendPrefixDeprecationInterval, func() {
 		Eng.Post(func() { firePrefixDeprecationWatch(masterIface, prefix, w) })
 	})
 }

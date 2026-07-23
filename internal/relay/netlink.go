@@ -86,8 +86,8 @@ func StartNetlinkMonitor(done <-chan struct{}) error {
 
 	// Deferred to the first Reload() (see mirrorSweepOnce/scheduleMirrorSweep)
 	// rather than started here: at this point config.json hasn't been loaded
-	// yet, so mirrorSweepInterval would still be the built-in default even if
-	// the config overrides it via global.mirror_sweep_interval_seconds.
+	// yet, so staleClientSweepInterval would still be the built-in default even
+	// if the config overrides it via global.stale_client_sweep_interval_seconds.
 	mirrorSweepDone = done
 
 	return nil
@@ -103,9 +103,9 @@ var mirrorSweepDone <-chan struct{}
 var mirrorSweepOnce sync.Once
 
 // scheduleMirrorSweep starts the periodic mirror sweep on its first call
-// (a no-op on subsequent calls), using whatever mirrorSweepInterval is in
-// effect at that point. Must be called after loadConfigJSON so a configured
-// global.mirror_sweep_interval_seconds is already applied.
+// (a no-op on subsequent calls), using whatever staleClientSweepInterval is
+// in effect at that point. Must be called after loadConfigJSON so a
+// configured global.stale_client_sweep_interval_seconds is already applied.
 func scheduleMirrorSweep() {
 	mirrorSweepOnce.Do(func() {
 		if mirrorSweepDone != nil {
@@ -120,8 +120,9 @@ func scheduleMirrorSweep() {
 // triggering reconciliation.
 const ourRouteMetric = 1024
 
-// mirrorSweepInterval is how often sweepFailedAndOrphans runs as a periodic
-// backstop, in addition to the event-driven cleanup in handleNeighEvent/
+// staleClientSweepInterval is how often sweepFailedAndOrphans runs as a
+// periodic backstop, in addition to the event-driven cleanup in
+// handleNeighEvent/
 // handleRouteEvent. It exists to catch things a purely event-driven
 // mechanism can never notice: a real neighbor-cache entry that was already
 // sitting in NUD_FAILED before this process's netlink subscription began
@@ -143,13 +144,13 @@ const ourRouteMetric = 1024
 // a host pushed to FAILED by this pass is picked up on the *next* sweep (or
 // immediately by handleNeighEvent, since that also watches for it).
 //
-// Overridable via global.mirror_sweep_interval_seconds in config.json (see
-// config.go's loadConfigJSON) - a package var rather than a const for that
-// reason, default unchanged.
-var mirrorSweepInterval = 300 * time.Second
+// Overridable via global.stale_client_sweep_interval_seconds in config.json
+// (see config.go's loadConfigJSON) - a package var rather than a const for
+// that reason, default unchanged.
+var staleClientSweepInterval = 300 * time.Second
 
 // startMirrorSweep arranges for sweepFailedAndOrphans to run every
-// mirrorSweepInterval until done is closed.
+// staleClientSweepInterval until done is closed.
 func startMirrorSweep(done <-chan struct{}) {
 	var tick func()
 	tick = func() {
@@ -159,13 +160,13 @@ func startMirrorSweep(done <-chan struct{}) {
 		default:
 		}
 		Eng.Post(sweepFailedAndOrphans)
-		time.AfterFunc(mirrorSweepInterval, tick)
+		time.AfterFunc(staleClientSweepInterval, tick)
 	}
-	time.AfterFunc(mirrorSweepInterval, tick)
+	time.AfterFunc(staleClientSweepInterval, tick)
 }
 
 // sweepFailedAndOrphans is the periodic backstop counterpart to
-// handleNeighEvent/handleRouteEvent (see mirrorSweepInterval). It applies
+// handleNeighEvent/handleRouteEvent (see staleClientSweepInterval). It applies
 // uniformly to every configured relay interface, master/WAN and slave/LAN
 // alike - deliberately not restricted to any particular address type (GUA
 // vs ULA), since an upstream WAN can itself be addressed out of ULA space;

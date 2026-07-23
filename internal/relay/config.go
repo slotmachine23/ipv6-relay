@@ -20,11 +20,11 @@ type Config struct {
 var Cfg = Config{}
 
 type jsonGlobal struct {
-	LogLevel                         *int  `json:"log_level"`
-	NotifyPrefixDeprecation          *bool `json:"notify_prefix_deprecation"`
-	PrefixMismatchPacketThreshold    *int  `json:"prefix_mismatch_packet_threshold"`
-	PrefixWithdrawIntervalSeconds    *int  `json:"prefix_withdraw_interval_seconds"`
-	MirrorSweepIntervalSeconds       *int  `json:"mirror_sweep_interval_seconds"`
+	LogLevel                             *int  `json:"log_level"`
+	NotifyPrefixDeprecation              *bool `json:"send_prefix_deprecation"`
+	PrefixMismatchPacketThreshold        *int  `json:"prefix_mismatch_packet_threshold"`
+	SendPrefixDeprecationIntervalSeconds *int  `json:"send_prefix_deprecation_interval_seconds"`
+	StaleClientSweepIntervalSeconds      *int  `json:"stale_client_sweep_interval_seconds"`
 }
 
 type jsonIface struct {
@@ -181,19 +181,19 @@ func loadConfigJSON(path string) {
 	}
 
 	if root.Global != nil && root.Global.NotifyPrefixDeprecation != nil {
-		prefixDeprecationEnabled = *root.Global.NotifyPrefixDeprecation
+		sendPrefixDeprecation = *root.Global.NotifyPrefixDeprecation
 	}
 	if root.Global != nil && root.Global.PrefixMismatchPacketThreshold != nil &&
 		*root.Global.PrefixMismatchPacketThreshold > 0 {
 		prefixMismatchThreshold = *root.Global.PrefixMismatchPacketThreshold
 	}
-	if root.Global != nil && root.Global.PrefixWithdrawIntervalSeconds != nil &&
-		*root.Global.PrefixWithdrawIntervalSeconds > 0 {
-		prefixWithdrawInterval = time.Duration(*root.Global.PrefixWithdrawIntervalSeconds) * time.Second
+	if root.Global != nil && root.Global.SendPrefixDeprecationIntervalSeconds != nil &&
+		*root.Global.SendPrefixDeprecationIntervalSeconds > 0 {
+		sendPrefixDeprecationInterval = time.Duration(*root.Global.SendPrefixDeprecationIntervalSeconds) * time.Second
 	}
-	if root.Global != nil && root.Global.MirrorSweepIntervalSeconds != nil &&
-		*root.Global.MirrorSweepIntervalSeconds > 0 {
-		mirrorSweepInterval = time.Duration(*root.Global.MirrorSweepIntervalSeconds) * time.Second
+	if root.Global != nil && root.Global.StaleClientSweepIntervalSeconds != nil &&
+		*root.Global.StaleClientSweepIntervalSeconds > 0 {
+		staleClientSweepInterval = time.Duration(*root.Global.StaleClientSweepIntervalSeconds) * time.Second
 	}
 
 	for name, ifaceObj := range root.Interfaces {
@@ -252,7 +252,7 @@ func Reload() {
 	loadConfigJSON(Cfg.ConfigFile)
 
 	// Only after config.json has been loaded (so a configured
-	// global.mirror_sweep_interval_seconds already took effect) - see
+	// global.stale_client_sweep_interval_seconds already took effect) - see
 	// scheduleMirrorSweep's doc comment.
 	scheduleMirrorSweep()
 

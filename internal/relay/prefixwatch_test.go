@@ -77,18 +77,18 @@ func withCleanPrefixWatchState(t *testing.T) {
 
 	oldInterfaces := interfaces
 	oldWatches := activePrefixWatches
-	oldEnabled := prefixDeprecationEnabled
+	oldEnabled := sendPrefixDeprecation
 	oldThreshold := prefixMismatchThreshold
 
 	interfaces = map[string]*Interface{}
 	activePrefixWatches = map[netip.Prefix]*prefixDeprecationWatch{}
-	prefixDeprecationEnabled = true
+	sendPrefixDeprecation = true
 	prefixMismatchThreshold = 3
 
 	t.Cleanup(func() {
 		interfaces = oldInterfaces
 		activePrefixWatches = oldWatches
-		prefixDeprecationEnabled = oldEnabled
+		sendPrefixDeprecation = oldEnabled
 		prefixMismatchThreshold = oldThreshold
 	})
 }
@@ -240,4 +240,3 @@ func TestTrackWANPrefixSnoopingSeedsWithNewPrefixAfterRestart(t *testing.T) {
 		t.Fatalf("newPrefix should be seeded as known, got %v", wan.knownWANPrefixes)
 	}
 }
-
