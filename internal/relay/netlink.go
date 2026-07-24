@@ -344,7 +344,7 @@ func reconcileKernelState() {
 		}
 		for _, a := range iface.Addr6 {
 			addr := a.Addr
-			if addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast() {
+			if addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast() || isULA(addr) {
 				continue
 			}
 			ndpMirrorAddr(addr, iface, true)
@@ -436,10 +436,11 @@ func handleAddrEvent(u netlink.AddrUpdate) {
 
 	// Link-local addresses are only valid on the local link and
 	// cross-interface proxy-NDP entries for them are guaranteed to
-	// become NUD_FAILED (see clearMirroredState, handleNeighEvent,
-	// and sweepIfaceFailedAndOrphans for matching guards).
+	// become NUD_FAILED; ULA addresses are locally-assigned and
+	// meaningless to relay to other interfaces (see clearMirroredState,
+	// handleNeighEvent and sweepIfaceFailedAndOrphans for matching guards).
 	if iface.NDP == ModeRelay && !addr.IsLoopback() && !addr.IsMulticast() &&
-		!addr.IsLinkLocalUnicast() {
+		!addr.IsLinkLocalUnicast() && !isULA(addr) {
 		ndpMirrorAddr(addr, iface, u.NewAddr)
 	}
 
@@ -454,7 +455,7 @@ func clearMirroredState(iface *Interface) {
 	for _, cached := range iface.Addr6 {
 		addr := cached.Addr
 		if iface.NDP == ModeRelay && !addr.IsLoopback() && !addr.IsMulticast() &&
-			!addr.IsLinkLocalUnicast() {
+			!addr.IsLinkLocalUnicast() && !isULA(addr) {
 			ndpMirrorAddr(addr, iface, false)
 		}
 	}
