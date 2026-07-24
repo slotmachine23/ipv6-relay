@@ -337,9 +337,12 @@ func reconcileKernelState() {
 		}
 	}
 
-	// Re-assert the mirror for every interface's own downstream addresses.
+	// Re-assert the mirror for every non-master interface's own downstream
+	// addresses. Master (WAN) interface addresses are for the upstream link
+	// only and have no neighbor entry — mirroring them creates an orphaned
+	// /128 route that the sweep deletes and this reconcile re-adds in a loop.
 	for _, iface := range interfaces {
-		if iface.NDP != ModeRelay {
+		if iface.NDP != ModeRelay || iface.Master {
 			continue
 		}
 		for _, a := range iface.Addr6 {
@@ -434,12 +437,14 @@ func handleAddrEvent(u netlink.AddrUpdate) {
 	}
 	addr = addr.Unmap()
 
-	// Link-local addresses are only valid on the local link and
-	// cross-interface proxy-NDP entries for them are guaranteed to
-	// become NUD_FAILED; ULA addresses are locally-assigned and
-	// meaningless to relay to other interfaces (see clearMirroredState,
-	// handleNeighEvent and sweepIfaceFailedAndOrphans for matching guards).
-	if iface.NDP == ModeRelay && !addr.IsLoopback() && !addr.IsMulticast() &&
+	// Master (WAN) interface addresses are for the upstream link only
+	// and have no neighbor entry on the interface itself; mirroring them
+	// would create an orphaned /128 route that the sweep deletes and
+	// reconcile re-adds, causing a permanent add/delete cycle.
+	// Link-local addresses are never valid cross-interface; ULA addresses
+	// are locally-assigned and meaningless to relay.
+	if iface.NDP == ModeRelay && !iface.Master &&
+		!addr.IsLoopback() && !addr.IsMulticast() &&
 		!addr.IsLinkLocalUnicast() && !isULA(addr) {
 		ndpMirrorAddr(addr, iface, u.NewAddr)
 	}
