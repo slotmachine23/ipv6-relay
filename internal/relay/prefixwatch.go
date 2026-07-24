@@ -65,27 +65,25 @@ func isULA(addr netip.Addr) bool {
 }
 
 // trackablePrefixAddr reports whether addr should ever participate in WAN
-// prefix-deprecation tracking: only ULA or globally routable unicast
-// addresses, exactly like the user asked - never link-local, multicast or
-// loopback (those are never a "prefix" worth comparing/tracking here).
+// prefix-deprecation tracking: only globally routable unicast addresses -
+// never link-local, multicast, loopback or ULA (those are never a "prefix"
+// worth comparing/tracking here).
 func trackablePrefixAddr(addr netip.Addr) bool {
-	if !addr.Is6() || addr.IsLinkLocalUnicast() || addr.IsMulticast() || addr.IsLoopback() {
+	if !addr.Is6() || addr.IsLinkLocalUnicast() || addr.IsMulticast() || addr.IsLoopback() || isULA(addr) {
 		return false
 	}
 	return true
 }
 
 // isGlobalUnicast reports whether addr is a globally routable unicast
-// address, i.e. not link-local/multicast/loopback and not ULA (tracked
-// separately by isULA - the two are mutually exclusive categories the user
-// asked to both snoop).
+// address, i.e. not link-local/multicast/loopback/ULA.
 func isGlobalUnicast(addr netip.Addr) bool {
-	return trackablePrefixAddr(addr) && !isULA(addr)
+	return trackablePrefixAddr(addr)
 }
 
 // parsePIOPrefixes walks a Router Advertisement's options (data must start
 // at the ICMPv6 header, i.e. include the fixed 16-byte RA header) and
-// returns every Prefix Information Option's prefix that is ULA or globally
+// returns every Prefix Information Option's prefix that is globally
 // routable unicast, masked to its advertised prefix length.
 func parsePIOPrefixes(data []byte) []netip.Prefix {
 	const raHdrLen = 16
@@ -110,7 +108,7 @@ func parsePIOPrefixes(data []byte) []netip.Prefix {
 			addr, ok := netip.AddrFromSlice(data[opt+16 : opt+32])
 			if ok && prefixLen >= 0 && prefixLen <= 128 {
 				a := addr.Unmap()
-				if isULA(a) || isGlobalUnicast(a) {
+				if isGlobalUnicast(a) {
 					if p, err := a.Prefix(prefixLen); err == nil {
 						out = append(out, p.Masked())
 					}
@@ -125,7 +123,7 @@ func parsePIOPrefixes(data []byte) []netip.Prefix {
 
 // trackWANPrefixSnooping is called for every real Router Advertisement
 // received on a master interface (see handleICMPv6/captureLastRAHeader in
-// router.go). It maintains iface.knownWANPrefixes, the set of ULA/GUA
+// router.go). It maintains iface.knownWANPrefixes, the set of GUA
 // prefixes currently considered "live" on this interface, purely from
 // real-time packet snooping (see the package doc comment above for why
 // this deliberately does NOT fall back to the kernel's own address list):
@@ -205,7 +203,7 @@ func trackWANPrefixSnooping(iface *Interface, data []byte) {
 // all) would keep trying to use it and fail, with nothing left to ever
 // tell it otherwise. So, alongside comparing this RA against the WAN
 // prefix set, also enumerate every LAN neighbor's address and check it
-// against the same set: any ULA/GUA neighbor address not covered by any
+// against the same set: any GUA neighbor address not covered by any
 // currently-known WAN prefix (from any seeded master) is orphaned and gets
 // a deprecation watch started for its /64 - the real neighbor cache
 // doesn't record the prefix length a host actually configured, so /64 (the
@@ -351,7 +349,7 @@ func sendPrefixDeprecationRA(masterIface *Interface, prefix netip.Prefix) int {
 }
 
 // countNeighborsUnderPrefix returns how many of iface's real (non-proxy)
-// IPv6 neighbor-cache entries are ULA/GUA addresses falling under prefix.
+// IPv6 neighbor-cache entries are GUA addresses falling under prefix.
 func countNeighborsUnderPrefix(iface *Interface, prefix netip.Prefix) int {
 	link, err := netlink.LinkByIndex(iface.Ifindex)
 	if err != nil {

@@ -53,7 +53,7 @@ func TestParsePIOPrefixesFiltersToULAAndGlobalUnicast(t *testing.T) {
 		want   bool
 	}{
 		{"2001:db8:1::/64", true},
-		{"fd00:1::/64", true},
+		{"fd00:1::/64", false},
 		{"fe80::/64", false},
 	}
 
