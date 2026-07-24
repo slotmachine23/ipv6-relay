@@ -215,7 +215,7 @@ func sweepIfaceFailedAndOrphans(iface *Interface) {
 		}
 		addr = addr.Unmap()
 
-		if addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast() {
+		if addr.IsLoopback() || addr.IsMulticast() {
 			continue
 		}
 
@@ -226,6 +226,10 @@ func sweepIfaceFailedAndOrphans(iface *Interface) {
 				ndpMirrorAddr(addr, iface, false)
 			}
 			deleteFailedNeigh(addr, iface.Ifindex)
+			continue
+		}
+
+		if addr.IsLinkLocalUnicast() {
 			continue
 		}
 
@@ -340,10 +344,7 @@ func reconcileKernelState() {
 		}
 		for _, a := range iface.Addr6 {
 			addr := a.Addr
-			if addr.IsLoopback() || addr.IsMulticast() {
-				continue
-			}
-			if addr.IsLinkLocalUnicast() && !iface.LearnRoutes {
+			if addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast() {
 				continue
 			}
 			ndpMirrorAddr(addr, iface, true)
@@ -433,8 +434,12 @@ func handleAddrEvent(u netlink.AddrUpdate) {
 	}
 	addr = addr.Unmap()
 
+	// Link-local addresses are only valid on the local link and
+	// cross-interface proxy-NDP entries for them are guaranteed to
+	// become NUD_FAILED (see clearMirroredState, handleNeighEvent,
+	// and sweepIfaceFailedAndOrphans for matching guards).
 	if iface.NDP == ModeRelay && !addr.IsLoopback() && !addr.IsMulticast() &&
-		(!addr.IsLinkLocalUnicast() || iface.LearnRoutes) {
+		!addr.IsLinkLocalUnicast() {
 		ndpMirrorAddr(addr, iface, u.NewAddr)
 	}
 
@@ -449,7 +454,7 @@ func clearMirroredState(iface *Interface) {
 	for _, cached := range iface.Addr6 {
 		addr := cached.Addr
 		if iface.NDP == ModeRelay && !addr.IsLoopback() && !addr.IsMulticast() &&
-			(!addr.IsLinkLocalUnicast() || iface.LearnRoutes) {
+			!addr.IsLinkLocalUnicast() {
 			ndpMirrorAddr(addr, iface, false)
 		}
 	}
@@ -500,7 +505,7 @@ func handleNeighEvent(u netlink.NeighUpdate) {
 	}
 	addr = addr.Unmap()
 
-	if addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast() {
+	if addr.IsLoopback() || addr.IsMulticast() {
 		return
 	}
 
@@ -513,7 +518,7 @@ func handleNeighEvent(u netlink.NeighUpdate) {
 	resolved := u.State&resolvedMask != 0
 	failed := u.State&unix.NUD_FAILED != 0
 
-	if resolved && !mirrored {
+	if resolved && !mirrored && !addr.IsLinkLocalUnicast() {
 		mirroredNeighs[key] = true
 		ndpMirrorAddr(addr, iface, true)
 	} else if failed {
