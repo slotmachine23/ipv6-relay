@@ -455,7 +455,7 @@ func clearMirroredState(iface *Interface) {
 	for _, cached := range iface.Addr6 {
 		addr := cached.Addr
 		if iface.NDP == ModeRelay && !addr.IsLoopback() && !addr.IsMulticast() &&
-			!addr.IsLinkLocalUnicast() && !isULA(addr) {
+			!addr.IsLinkLocalUnicast() {
 			ndpMirrorAddr(addr, iface, false)
 		}
 	}
